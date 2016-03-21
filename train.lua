@@ -17,6 +17,7 @@ cmd:option('-batch_size', 50)
 cmd:option('-seq_length', 50)
 
 -- Model options
+cmd:option('-init_from', '')
 cmd:option('-model_type', 'lstm')
 cmd:option('-wordvec_size', 64)
 cmd:option('-rnn_size', 128)
@@ -32,7 +33,7 @@ cmd:option('-lr_decay_every', 5)
 cmd:option('-lr_decay_factor', 0.5)
 
 -- Output options
-cmd:option('-print_every', 1)
+cmd:option('-print_every', 10)
 cmd:option('-checkpoint_every', 1000)
 cmd:option('-checkpoint_name', 'cv/checkpoint')
 
@@ -81,7 +82,13 @@ end
 -- Initialize the model and criterion
 local opt_clone = torch.deserialize(torch.serialize(opt)) -- used as copy
 opt_clone.idx_to_token = idx_to_token
-local model = nn.LanguageModel(opt_clone):type(dtype) -- model
+local model = nil  -- model
+if opt.init_from ~= '' then
+  print('Initializing from ', opt.init_from)
+  model = torch.load(opt.init_from).model:type(dtype)
+else
+  model = nn.LanguageModel(opt_clone):type(dtype)
+end
 local params, grad_params = model:getParameters() -- parameters
 local crit = nn.CrossEntropyCriterion():type(dtype) -- criterion (the output is score so we use this one)
 

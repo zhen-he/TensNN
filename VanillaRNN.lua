@@ -108,14 +108,14 @@ function layer:updateOutput(input)
   local h0, x = self:_unpack_input(input)
   local N, T, D, H = self:_get_sizes(input)
   self._return_grad_h0 = (h0 ~= nil)
-  if not h0 then -- h0 is not provided
+  if not h0 then -- if h0 is not provided, which is a usual case
     h0 = self.h0
     if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
       h0:resize(N, H):zero()
     elseif self.remember_states then -- if remember, use the previous evaluated h as h0
       local prev_N, prev_T = self.output:size(1), self.output:size(2)
       assert(prev_N == N, 'batch sizes must be constant to remember states')
-      h0:copy(self.output[{{}, prev_T}])
+      h0:copy(self.output[{{}, prev_T}]) -- the last one of the previous batch
     end
   end
 
@@ -134,7 +134,7 @@ function layer:updateOutput(input)
     prev_h = next_h
   end
 
-  return self.output
+  return self.output -- the output is always a tensor (never be table)
 end
 
 
@@ -181,8 +181,7 @@ function layer:backward(input, gradOutput, scale)
   if self._return_grad_h0 then
     self.gradInput = {self.grad_h0, self.grad_x}
   else
-    self.gradInput = self.grad_x
-  end
+    self.gradInput = self.grad_x -- the usual case
 
   return self.gradInput
 end
