@@ -59,19 +59,16 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   end
   self.output = self.states[{{}, unpack(outputCoors)}]
 
-  self.buffer1 = torch.Tensor() -- This will be (N, H)
-  self.buffer2 = torch.Tensor() -- This will be (N, H)
-  self.buffer3 = torch.Tensor() -- This will be (H,)
-  self.grad_a_buffer = torch.Tensor() -- This will be (N, 5H)
+  self.grad_hn = torch.Tensor(N, H) -- This will be (N, H)
+  self.grad_cn = torch.Tensor(N, H) -- This will be (N, H)
+  self.grad_b_sum = torch.Tensor(1, 5 * H) -- This will be (1, 5H)
+  self.grad_a = torch.Tensor(N, 5 * H) -- This will be (N, 5H)
 
   self.h0 = torch.Tensor()
   self.c0 = torch.Tensor()
   self.remember_states = false
 
-  self.grad_c0 = torch.Tensor()
-  self.grad_h0 = torch.Tensor()
-  self.grad_x = torch.Tensor()
-  self.gradInput = {self.grad_c0, self.grad_h0, self.grad_x}
+  self.gradInput = torch.Tensor()
 end
 
 -- reset weights and bias
@@ -170,23 +167,12 @@ local function IncreaseCoor(currentCoor, tensorSize)
   return currentCoor
 end
 
---[[
-Input:
-- c0: Initial cell state, (N, tensDims, H)
-- h0: Initial hidden state, (N, tensDims, H)
-- x: Input sequence, (N, T, D)
-
-Output:
-- h: Sequence of hidden states, (N, T, tensDims, H)
---]]
-
 
 function hidden:updateOutput(input)
   
-  local x = input
   self:CheckSize(input)
+  local x = input
   local H, N = self.nodeSize, self.batchSize
-
   local h, c = self.h, self.c
   local h0, c0 = self.h0, self.c0
 
@@ -200,7 +186,7 @@ function hidden:updateOutput(input)
   local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim])
   if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
     c0:resizeAs(c0_):zero()
-  elseif -- if remember, use the previous evaluated c as c0
+  else -- if remember, use the previous evaluated c as c0
     c0:copy(c0_)
   end
 
@@ -291,27 +277,28 @@ end
 
 
 function hidden:backward(input, gradOutput, scale)
+
+  self:CheckSize(input, gradOutput)
   scale = scale or 1.0
-  local c0, h0, x = self:_unpack_input(input)
-  if not c0 then c0 = self.c0 end
-  if not h0 then h0 = self.h0 end
+  local x = input
+  local H, N = self.nodeSize, self.batchSize
+  local h, c = self.h, self.c
+  local h0, c0 = self.h0, self.c0
+  
+  local grad_x = self.gradInput
+  local grad_y = gradOutput
 
-  local grad_c0, grad_h0, grad_x = self.grad_c0, self.grad_h0, self.grad_x
-  local h, c = self.output, self.cell
-  local grad_h = gradOutput
-
-  local N, T, D, H = self:_get_sizes(input, gradOutput)
-  local w1 = self.weight[{{1, D}}]
-  local w2 = self.weight[{{D + 1, D + H}}]
-  local grad_w1 = self.gradWeight[{{1, D}}]
-  local grad_w2 = self.gradWeight[{{D + 1, D + H}}]
+  local w1 = self.weight[{{1, H}}]
+  local w2 = self.weight[{{H + 1, 2 * H}}]
+  local grad_w1 = self.gradWeight[{{1, H}}]
+  local grad_w2 = self.gradWeight[{{H + 1, 2 * H}}]
   local grad_b = self.gradBias
+  local grad_b_sum = self.grad_b_sum
 
-  grad_h0:resizeAs(h0):zero()
-  grad_c0:resizeAs(c0):zero()
   grad_x:resizeAs(x):zero()
-  local grad_next_h = self.buffer1:resizeAs(h0):zero()
-  local grad_next_c = self.buffer2:resizeAs(c0):zero()
+  local grad_hn = self.grad_hn:zero()
+  local grad_cn = self.grad_cn:zero()
+
   for t = T, 1, -1 do
     local next_h, next_c = h[{{}, t}], c[{{}, t}]
     local prev_h, prev_c = nil, nil
@@ -320,56 +307,49 @@ function hidden:backward(input, gradOutput, scale)
     else
       prev_h, prev_c = h[{{}, t - 1}], c[{{}, t - 1}]
     end
-    grad_next_h:add(grad_h[{{}, t}]) -- add the gradient from upper layer (not the next time step)
+    grad_hn:add(grad_y[{{}, t}]) -- add the gradient from upper layer (not the next time step)
 
     local i = self.gates[{{}, t, {1, H}}]
     local f = self.gates[{{}, t, {H + 1, 2 * H}}]
     local o = self.gates[{{}, t, {2 * H + 1, 3 * H}}]
     local g = self.gates[{{}, t, {3 * H + 1, 4 * H}}]
     
-    local grad_a = self.grad_a_buffer:resize(N, 4 * H):zero() -- gradients of activations
+    local grad_a = self.grad_a:zero() -- gradients of activations
     local grad_ai = grad_a[{{}, {1, H}}]
     local grad_af = grad_a[{{}, {H + 1, 2 * H}}]
     local grad_ao = grad_a[{{}, {2 * H + 1, 3 * H}}]
     local grad_ag = grad_a[{{}, {3 * H + 1, 4 * H}}]
     
     -- We will use grad_ai, grad_af, and grad_ao as temporary buffers
-    -- to compute grad_next_c. We will need tanh_next_c (stored in grad_ai)
+    -- to compute grad_cn. We will need tanh_next_c (stored in grad_ai)
     -- to compute grad_ao; the other values can be overwritten after we compute
-    -- grad_next_c
+    -- grad_cn
     local tanh_next_c = grad_ai:tanh(next_c) -- grad_ai is used as a buffer
     local tanh_next_c2 = grad_af:cmul(tanh_next_c, tanh_next_c) -- grad_af is used as a buffer
-    local my_grad_next_c = grad_ao -- grad_ao is used as a buffer
-    my_grad_next_c:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_next_h)
-    grad_next_c:add(my_grad_next_c) -- accumulate the gradient of cell from hidden state (not the next time step)
+    local my_grad_cn = grad_ao -- grad_ao is used as a buffer
+    my_grad_cn:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_hn)
+    grad_cn:add(my_grad_cn) -- accumulate the gradient of cell from hidden state (not the next time step)
     
-    -- We need tanh_next_c (currently in grad_ai) to compute grad_ao; after
-    -- that we can overwrite it.
-    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_next_h)
+    -- We need tanh_next_c (currently in grad_ai) to compute grad_ao; after that we can overwrite it.
+    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_hn)
 
     -- Use grad_ai as a temporary buffer for computing grad_ag
     local g2 = grad_ai:cmul(g, g)
-    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_next_c)
+    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_cn)
 
     -- We don't need any temporary storage for these so do them last
-    grad_ai:fill(1):add(-1, i):cmul(i):cmul(g):cmul(grad_next_c)
-    grad_af:fill(1):add(-1, f):cmul(f):cmul(prev_c):cmul(grad_next_c)
+    grad_ai:fill(1):add(-1, i):cmul(i):cmul(g):cmul(grad_cn)
+    grad_af:fill(1):add(-1, f):cmul(f):cmul(prev_c):cmul(grad_cn)
     
     grad_x[{{}, t}]:mm(grad_a, w1:t()) -- (N by 4H) * (4H by D) = N by D
     grad_w1:addmm(scale, x[{{}, t}]:t(), grad_a) -- temporally accumulate the gradients of parameters, as they are shared
     grad_w2:addmm(scale, prev_h:t(), grad_a)
-    local grad_a_sum = self.buffer3:resize(H):sum(grad_a, 1) -- directly accumulate grad_b inside a batch
-    grad_b:add(scale, grad_a_sum)
+    self.grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
+    grad_b:add(scale, self.grad_b_sum)
 
-    grad_next_h:mm(grad_a, w2:t()) -- (N by 4H) * (4H by H) = N by H
-    grad_next_c:cmul(f)
+    grad_hn:mm(grad_a, w2:t()) -- (N by 4H) * (4H by H) = N by H
+    grad_cn:cmul(f)
   end
-  grad_h0:copy(grad_next_h)
-  grad_c0:copy(grad_next_c)
-
-
-    self.gradInput = self.grad_x
-
 
   return self.gradInput
 end
@@ -378,13 +358,11 @@ end
 function hidden:clearState()
   self.cell:set()
   self.gates:set()
-  self.buffer1:set()
-  self.buffer2:set()
-  self.buffer3:set()
-  self.grad_a_buffer:set()
+  self.grad_hn:set()
+  self.grad_cn:set()
+  self.grad_b_sum:set()
+  self.grad_a:set()
 
-  self.grad_c0:set()
-  self.grad_h0:set()
   self.grad_x:set()
   self.output:set()
 end
