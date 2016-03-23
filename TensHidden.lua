@@ -13,7 +13,9 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   self.nodeSize = nodeSize
   self.batchSize = batchSize
 
-  local H, N = self.nodeSize, self.batchSize
+  self.inputDim = #self.inputShape
+  self.tensDim = #self.tensShape
+  self.decompNum = self.inputDim + self.tensDim - 1
 
   self.hiddenShape = {} -- table
   for _, v in ipairs(self.inputShape) do
@@ -22,45 +24,58 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   for _, v in ipairs(self.tensShape) do
     table.insert(self.hiddenShape, v)
   end
-  table.insert(self.hiddenShape, #self.hiddenShape - 1) -- for the the decomposed extra nodes
-  
-  self.inputDim = #self.inputShape
-  self.tensDim = #self.tensShape
+  table.insert(self.hiddenShape, self.decompNum)
   self.hiddenDim = #self.hiddenShape
+  self.totalDim = self.hiddenDim + 2 -- one for batch and one for node vector
 
   self.nodeNum = 1
   for _, v in ipairs(self.hiddenShape) do
       self.nodeNum = self.nodeNum * v
   end
   
+  local H, N = self.nodeSize, self.batchSize
   self.weight = torch.Tensor(2 * H, 5 * H) -- input gate, forget gate1, forget gate2, output gate, new content
   self.gradWeight = torch.Tensor(2 * H, 5 * H):zero()
   self.bias = torch.Tensor(5 * H)
   self.gradBias = torch.Tensor(5 * H):zero()
-  self:reset()
-
+  
   local sz = {N}
   for _, v in ipairs(self.hiddenShape) do
-    table.insert(sz, v)
+    table.insert(sz, v + 1)
   end
   table.insert(sz, 2 * H)
-  self.states = torch.Tensor(unpack(sz)):zero() -- This will be (N, unpack(self.hiddenShape), 2H)
-  self.h = self.states:narrow(self.states:dim(), 1, H)
-  self.c = self.states:narrow(self.states:dim(), H + 1, H)
+  self.buffer1 = torch.Tensor(unpack(sz)):zero()
+
+  local stateRegion, stateGradRegion = {1, N, 1, H}, {1, N, 1, H}
+  local outputRegion, gradInputRegion = {1, N, 1, H}, {1, N, 1, H}
+  for i, v in ipairs(self.hiddenShape) do
+    table.insert(stateRegion, 1); table.insert(stateRegion, v)
+    table.insert(gradRegion, 2); table.insert(gradRegion, v + 1)
+    if  i <= self.inputDim then
+      table.insert(outputRegion, 1); table.insert(outputRegion, v)
+      table.insert(gradInputRegion, 2); table.insert(gradInputRegion, v + 1)
+    else
+      table.insert(outputRegion, v); table.insert(outputRegion, v)
+      table.insert(gradInputRegion, 2); table.insert(gradInputRegion, 2)
+    end
+  end
+  local states = buffer1:sub(unpack(stateRegion))
+  local stateGrads = buffer1:sub(unpack(stateGradRegion))
+  self.output = buffer1:sub(unpack(outputRegion))
+  self.gradInput = buffer1:sub(unpack(gradInputRegion))
+
+  local S = self.totalDim
+  self.h = states:narrow(S, 1, H)
+  self.c = states:narrow(S, H + 1, H)
+  self.grad_h = stateGrads:narrow(S, 1, H)
+  self.grad_c = stateGrads:narrow(S, H + 1, H)
+
+  for i, v in ipairs(self.hiddenShape) do
+    sz[1 + i] = v
+  end
   sz[#sz] = 5 * H
   self.gates = torch.Tensor(unpack(sz)):zero() -- This will be (N, unpack(self.hiddenShape), 5H)
 
-  local outputCoors = {}
-  for i = 1, self.inputDim do
-    table.insert(outputCoors, {})
-  end
-  for i = self.inputDim + 1, self.hiddenDim do
-    table.insert(outputCoors, self.hiddenShape[i])
-  end
-  self.output = self.states[{{}, unpack(outputCoors)}]
-
-  self.grad_hn = torch.Tensor(N, H) -- This will be (N, H)
-  self.grad_cn = torch.Tensor(N, H) -- This will be (N, H)
   self.grad_b_sum = torch.Tensor(1, 5 * H) -- This will be (1, 5H)
   self.grad_a = torch.Tensor(N, 5 * H) -- This will be (N, 5H)
 
@@ -68,7 +83,7 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   self.c0 = torch.Tensor()
   self.remember_states = false
 
-  self.gradInput = torch.Tensor()
+  self:reset()
 end
 
 -- reset weights and bias
@@ -152,15 +167,16 @@ function hidden:_get_sizes(input, gradOutput)
   return N, T, H
 end
 
-local function IncreaseCoor(currentCoor, tensorSize)
-  local dimNum = #currentCoor
-  
-  currentCoor[dimNum] = currentCoor[dimNum] + 1
-  for i = dimNum, 1, -1 do
-    if currentCoor[i] > tensorSize[i] then
-      currentCoor[i] = 1
-      if i == 1 then break end
-      currentCoor[i - 1] = currentCoor[i - 1] + 1
+function self:MoveCoor(currentCoor, step) -- step should be 1 or -1
+
+  for i = #currentCoor, 1, -1 do
+    currentCoor[i] = currentCoor[i] + step
+    if currentCoor[i] > 0 and currentCoor[i] <= self.hiddenShape[i] then
+      break
+    elseif currentCoor[i] == 0 then
+        currentCoor[i] = self.hiddenShape[i]
+    else
+        currentCoor[i] = 1
     end
   end
   
@@ -180,14 +196,14 @@ function hidden:updateOutput(input)
   if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
     h0:resizeAs(h0_):zero()
   else -- if remember, use the previous evaluated h as h0
-    h0:copy(h0_)
+    h0 = h0_:clone()
   end
 
   local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim])
   if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
     c0:resizeAs(c0_):zero()
   else -- if remember, use the previous evaluated c as c0
-    c0:copy(c0_)
+    c0 = c0_:clone()
   end
 
   local bias_expand = self.bias:view(1, 5 * H):expand(N, 5 * H) -- copy the bias for a batch
@@ -200,12 +216,11 @@ function hidden:updateOutput(input)
     table.insert(coor, 1)
   end
 
-  local h1 = torch.Tensor(N * H)
-  local c1 = torch.Tensor(N * H)
-  local h2 = torch.Tensor(N * H)
-  local c2 = torch.Tensor(N * H)
-  for i = 1, self.nodeNum / self.hiddenShape(self.hiddenDim) do
-    for j = 0, self.hiddenShape(self.hiddenDim) do  
+  local h1, c1 = torch.Tensor(), torch.Tensor()
+  local h2, c2 = torch.Tensor(), torch.Tensor()
+
+  for i = 1, self.nodeNum / self.decompNum do
+    for j = 0, self.decompNum do  
 
       -- find a previous node
       local changedDim = self.hiddenDim - 1 - j -- the dimension where the coordinate need to be minus 1
@@ -264,10 +279,10 @@ function hidden:updateOutput(input)
         cn:cmul(f1, c1):addcmul(f2, c2):add(hn) -- new memories
         hn:tanh(cn):cmul(o) -- new hidden states
         h1, c1 = hn, cn -- save
-        coor = IncreaseCoor(coor, self.hiddenShape)
+        coor = self:MoveCoor(coor, 1)
       else
-        h1:copy(h2)
-        c1:copy(c2)
+        h1 = h2:clone()
+        c1 = c2:clone()
       end
     end
   end
@@ -284,16 +299,29 @@ function hidden:backward(input, gradOutput, scale)
   local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
   local h0, c0 = self.h0, self.c0
-  
-  local grad_x = self.gradInput
-  local grad_y = gradOutput
 
+  local grad_y = gradOutput
+  local grad_x = self.gradInput
+  
   local w1 = self.weight[{{1, H}}]
   local w2 = self.weight[{{H + 1, 2 * H}}]
   local grad_w1 = self.gradWeight[{{1, H}}]
   local grad_w2 = self.gradWeight[{{H + 1, 2 * H}}]
   local grad_b = self.gradBias
   local grad_b_sum = self.grad_b_sum
+
+  -- initialize the coordinate of current node
+  local coor = {}
+  for i = 1, self.hiddenDim do
+    table.insert(coor, self.hiddenShape[i])
+  end
+
+  for i = self.nodeNum / self.decompNum, 1, -1 do
+    for j = self.decompNum, 0, -1 do
+
+
+    end
+  end
 
   grad_x:resizeAs(x):zero()
   local grad_hn = self.grad_hn:zero()
