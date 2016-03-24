@@ -46,23 +46,26 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   table.insert(sz, 2 * H)
   self.buffer1 = torch.Tensor(unpack(sz)):zero()
 
-  local stateRegion, stateGradRegion = {1, N, 1, H}, {1, N, 1, H}
-  local outputRegion, gradInputRegion = {1, N, 1, H}, {1, N, 1, H}
+  local stateRegion, stateGradRegion = {1, N}, {1, N}
+  local outputRegion, gradInputRegion, gradOutputRegion = {1, N}, {1, N}, {1, N}
   for i, v in ipairs(self.hiddenShape) do
     table.insert(stateRegion, 1); table.insert(stateRegion, v)
-    table.insert(gradRegion, 2); table.insert(gradRegion, v + 1)
-    if  i <= self.inputDim then
+    table.insert(stateGradRegion, 1); table.insert(stateGradRegion, v + 1)
+    if i <= self.inputDim then
       table.insert(outputRegion, 1); table.insert(outputRegion, v)
       table.insert(gradInputRegion, 2); table.insert(gradInputRegion, v + 1)
+      table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
     else
       table.insert(outputRegion, v); table.insert(outputRegion, v)
-      table.insert(gradInputRegion, 2); table.insert(gradInputRegion, 2)
+      table.insert(gradInputRegion, 1); table.insert(gradInputRegion, 1)
+      table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
     end
   end
   local states = buffer1:sub(unpack(stateRegion))
   local stateGrads = buffer1:sub(unpack(stateGradRegion))
   self.output = buffer1:sub(unpack(outputRegion))
   self.gradInput = buffer1:sub(unpack(gradInputRegion))
+  self.gradOutput = buffer1:sub(unpack(gradOutputRegion))
 
   local S = self.totalDim
   self.h = states:narrow(S, 1, H)
@@ -82,6 +85,17 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   self.h0 = torch.Tensor()
   self.c0 = torch.Tensor()
   self.remember_states = false
+
+  self.input = torch.Tensor()
+
+  sz = {}
+  for _, v in ipairs(self.hiddenShape) do
+    table.insert(sz, v + 1)
+  end
+  self.gradIndicator = torch.ByteTensor(unpack(sz)):zero()
+  table.remove(gradOutputRegion, 1)
+  table.remove(gradOutputRegion, 1)
+  self.gradIndicator:sub(unpack(gradOutputRegion)):fill(1)
 
   self:reset()
 end
@@ -103,15 +117,10 @@ function hidden:resetStates()
   self.c0 = self.c0.new()
 end
 
+function hidden:CheckSize()
+  
+  local input, gradOutput = self.input, self.gradOutput
 
-local function check_dims(x, dims)
-  assert(x:dim() == #dims)
-  for i, d in ipairs(dims) do
-    assert(x:size(i) == d)
-  end
-end
-
-function hidden:CheckSize(input, gradOutput)
   assert(input:dim() == self.inputDim + 2)
   assert(input:size(1) == self.batchSize)
   for i, v in ipairs(self.inputShape) do
@@ -119,52 +128,6 @@ function hidden:CheckSize(input, gradOutput)
   end
   assert(input:size(input:dim()) == self.nodeSize * 2)
 
-  if gradOutput then
-    assert(gradOutput:dim() == input:dim())
-    for i, v in ipairs(self.inputShape) do
-      assert(gradOutput:size(i) == v)
-    end
-  end
-end
-
-
-function hidden:_unpack_input(input)
-  local c0, h0, x = nil, nil, nil
-  if torch.type(input) == 'table' and #input == 3 then
-    c0, h0, x = unpack(input)
-  elseif torch.type(input) == 'table' and #input == 2 then
-    h0, x = unpack(input)
-  elseif torch.isTensor(input) then
-    x = input
-  else
-    assert(false, 'invalid input')
-  end
-  return c0, h0, x
-end
-
-
-function hidden:_get_sizes(input, gradOutput)
-  local c0, h0, x = self:_unpack_input(input)
-  local N, T = x:size(1), x:size(2)
-  local H = self.nodeSize
-  check_dims(x, {N, T, H})
-  if h0 or c0 then
-    local sz = {N}
-    for _, v in ipairs(self.tensShape) do
-      table.insert(sz, v)
-    end
-    table.insert(sz, H)
-    if h0 then
-      check_dims(h0, sz)
-    end
-    if c0 then
-      check_dims(c0, sz)
-    end
-  end
-  if gradOutput then
-    check_dims(gradOutput, {N, T, H})
-  end
-  return N, T, H
 end
 
 function self:MoveCoor(currentCoor, step) -- step should be 1 or -1
@@ -179,15 +142,114 @@ function self:MoveCoor(currentCoor, step) -- step should be 1 or -1
         currentCoor[i] = 1
     end
   end
-  
-  return currentCoor
+
+end
+
+
+function self:InitGradIndicator() -- step should be 1 or -1
+
+  local sz = {}
+  for _, v in ipairs(self.hiddenShape) do
+    table.insert(sz, v + 1)
+  end
+  self.gradIndicator:resize(unpack(sz)):zero()
+
+  local gradOutputRegion = {}
+  for i, v in ipairs(self.hiddenShape) do
+    if i <= self.inputDim then
+      table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
+    else
+      table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
+    end
+  end
+  self.gradIndicator:sub(unpack(gradOutputRegion))
+
+end
+
+
+function hidden:GetPredecessorState(curCoor, predecessorDim)
+
+  local x = self.input
+  local H, N = self.nodeSize, self.batchSize
+  local h, c = self.h, self.c
+  local h0, c0 = self.h0, self.c0
+  local hp, cp = torch.Tensor(), torch.Tensor()
+
+  if curCoor[predecessorDim] > 1 then
+    -- point to the previous node
+    curCoor[predecessorDim] = curCoor[predecessorDim] - 1
+    local coorv = curCoor[self.hiddenDim]
+    if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
+      curCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
+    end
+    hp = h[{{}, unpack(curCoor)}] -- N * H
+    cp = c[{{}, unpack(curCoor)}] -- N * H
+    -- recover to the current coordinate
+    curCoor[predecessorDim] = curCoor[predecessorDim] + 1
+    curCoor[self.hiddenDim] = coorv
+  else -- the case that requires initial states (out of the network's shape)
+    predecessorDim = math.min(predecessorDim, self.hiddenDim - 1)
+    hp:resize(N, H):zero()
+    cp:resize(N, H):zero()
+    if predecessorDim == self.inputDim then -- get value from the last states of previous batch
+      table.remove(curCoor, predecessorDim)
+      hp = h0[{{}, unpack(curCoor)}] -- N * H
+      cp = c0[{{}, unpack(curCoor)}] -- N * H
+      table.insert(curCoor, predecessorDim, 1)
+    elseif predecessorDim == self.inputDim + self.tensDim then -- get value from input
+      local isFromInput = true
+      for i = self.inputDim + 1, self.inputDim + self.tensDim - 1 do
+        if curCoor[i] ~= 1 then
+          isFromInput = false
+          break
+        end
+      end
+      if isFromInput then
+        local inputCoor = {}
+        for i = 1, self.inputDim do
+          inputCoor[i] = curCoor[i]
+        end
+        local hpcp = x[{{}, unpack(inputCoor)}] -- N * 2H
+        hp = hpcp[{{}, {1, H}}] -- N * H
+        cp = hpcp[{{}, {H + 1, 2 * H}}] -- N * H
+      end
+    end
+  end
+
+  return hp, cp
+
+end
+
+
+function hidden:GetPredecessorCoor(curCoor, predecessorDim)
+
+  local preCoor = {}
+  for i, v in ipairs(curCoor) do
+    preCoor[i] = v
+  end
+
+  if preCoor[predecessorDim] == 1 then -- the case that requires initial states (out of the network's shape)
+    predecessorDim = math.min(predecessorDim, self.hiddenDim - 1)
+  end
+  if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
+    preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
+  end
+  preCoor[predecessorDim] = preCoor[predecessorDim] - 1
+
+  for i, v in ipairs(preCoor) do
+    preCoor[i] = v + 1
+  end
+
+  return preCoor
+
 end
 
 
 function hidden:updateOutput(input)
   
-  self:CheckSize(input)
-  local x = input
+  self.input = input
+  self:CheckSize()
+  
   local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
   local h0, c0 = self.h0, self.c0
@@ -213,94 +275,58 @@ function hidden:updateOutput(input)
   -- initialize the coordinate of current node
   local coor = {}
   for i = 1, self.hiddenDim do
-    table.insert(coor, 1)
+    coor[i] = 1
   end
 
   local h1, c1 = torch.Tensor(), torch.Tensor()
   local h2, c2 = torch.Tensor(), torch.Tensor()
 
   for i = 1, self.nodeNum / self.decompNum do
-    for j = 0, self.decompNum do  
+    for j = 1, self.decompNum do  
 
-      -- find a previous node
-      local changedDim = self.hiddenDim - 1 - j -- the dimension where the coordinate need to be minus 1
-      if coor[changedDim] > 1 then -- the usual case
-        -- point to the previous node
-        coor[changedDim] = coor[changedDim] - 1
-        local coorv = coor[self.hiddenDim]
-        coor[self.hiddenDim] = -1
-        h2 = h[{{}, unpack(coor)}] -- N * H
-        c2 = c[{{}, unpack(coor)}] -- N * H
-        -- recover to the current coordinate
-        coor[changedDim] = coor[changedDim] + 1
-        coor[self.hiddenDim] = coorv
-      else -- the case that requires initial states (out of the network's shape)
-        h2:resize(N, H):zero()
-        c2:resize(N, H):zero()
-        if changedDim == self.inputDim then -- get value from the last states of previous batch
-          table.remove(coor, changedDim)
-          h2 = h0[{{}, unpack(coor)}] -- N * H
-          c2 = c0[{{}, unpack(coor)}] -- N * H
-          table.insert(coor, changedDim, 1)
-        elseif changedDim == self.inputDim + self.tensDim then -- get value from input
-          local isFromInput = true
-          for i = self.inputDim + 1, self.inputDim + self.tensDim - 1 do
-            if coor[i] ~= 1 then
-              isFromInput = false
-              break
-            end
-          end
-          if isFromInput then
-            local inputCoor = {}
-            for i = 1, self.inputDim do
-              table.insert(inputCoor, coor[i])
-            end
-            local h2c2 = input[{{}, unpack(inputCoor)}] -- N * 2H
-            h2 = h2c2[{{}, {1, H}}] -- N * H
-            c2 = h2c2[{{}, {H + 1, 2 * H}}] -- N * H
-          end
-        end
-      end
+      -- find predecessors
+      local h1, c1 = self:GetPredecessorState(coor, self.hiddenDim)
+      local h2, c2 = self:GetPredecessorState(coor, self.hiddenDim - 1 - j)
+
       -- update the current node
-      if j > 0 then
-        local hn = h[{{}, unpack(coor)}] -- N * H
-        local cn = c[{{}, unpack(coor)}] -- N * H
-        local gates = self.gates[{{}, unpack(coor)}] -- N * 5H
-        gates:addmm(bias_expand, h1, w1) -- w1 * h1 + b
-        gates:addmm(h2, w2) -- w1 * h1 + b + w2 * x2
-        gates[{{}, {1, 4 * H}}]:sigmoid() -- for gates
-        gates[{{}, {4 * H + 1, 5 * H}}]:tanh() -- for new content
-        local i  = cur_gates[{{}, {1, H}}]
-        local f1 = cur_gates[{{}, {H + 1, 2 * H}}]
-        local f2 = cur_gates[{{}, {2 * H + 1, 3 * H}}]
-        local o  = cur_gates[{{}, {3 * H + 1, 4 * H}}]
-        local g  = cur_gates[{{}, {4 * H + 1, 5 * H}}]
-        hn:cmul(i, g) -- gated new contents
-        cn:cmul(f1, c1):addcmul(f2, c2):add(hn) -- new memories
-        hn:tanh(cn):cmul(o) -- new hidden states
-        h1, c1 = hn, cn -- save
-        coor = self:MoveCoor(coor, 1)
-      else
-        h1 = h2:clone()
-        c1 = c2:clone()
-      end
+      local hn = h[{{}, unpack(coor)}]
+      local cn = c[{{}, unpack(coor)}]
+      local curGates = self.gates[{{}, unpack(coor)}] -- N * 5H
+      curGates:addmm(bias_expand, h1, w1) -- w1 * h1 + b
+      curGates:addmm(h2, w2) -- w1 * h1 + b + w2 * h2
+      curGates:narrow(2, 1, 4 * H):sigmoid() -- for gates
+      curGates:narrow(2, 4 * H + 1, H):tanh() -- for new content
+      local i  = curGates:narrow(2, 1, H)
+      local f1 = curGates:narrow(2, H + 1, H)
+      local f2 = curGates:narrow(2, 2 * H + 1, H)
+      local o  = curGates:narrow(2, 3 * H + 1, H)
+      local g  = curGates:narrow(2, 4 * H + 1, H)
+      hn:cmul(i, g) -- gated new contents
+      cn:cmul(f1, c1):addcmul(f2, c2):add(hn) -- new memories
+      hn:tanh(cn):cmul(o) -- new hidden states
+      coor = self:MoveCoor(coor, 1)
     end
   end
 
+  self.input:set()
   return self.output
 end
 
 
 function hidden:backward(input, gradOutput, scale)
 
-  self:CheckSize(input, gradOutput)
+  self.input = input
+  self:CheckSize()
+
+  self.gradOutput = gradOutput:clone()
   scale = scale or 1.0
-  local x = input
+
   local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
   local h0, c0 = self.h0, self.c0
+  local grad_h = self.grad_h
+  local grad_c = self.grad_c
 
-  local grad_y = gradOutput
   local grad_x = self.gradInput
   
   local w1 = self.weight[{{1, H}}]
@@ -310,75 +336,104 @@ function hidden:backward(input, gradOutput, scale)
   local grad_b = self.gradBias
   local grad_b_sum = self.grad_b_sum
 
+  local gradIndicator = self.gradIndicator:clone()
+
   -- initialize the coordinate of current node
   local coor = {}
   for i = 1, self.hiddenDim do
-    table.insert(coor, self.hiddenShape[i])
+    coor[i] = self.hiddenShape[i]
   end
+
+  local grad_h2, grad_c2 = torch.Tensor(), torch.Tensor()
 
   for i = self.nodeNum / self.decompNum, 1, -1 do
     for j = self.decompNum, 0, -1 do
 
+      -- find predecessor states
+      local h1, c1 = self:GetPredecessorState(coor, self.hiddenDim)
+      local h2, c2 = self:GetPredecessorState(coor, self.hiddenDim - 1 - j)
 
-    end
-  end
+      -- point to the gradients of the predecessors
+      local preCoor1 = self:GetPredecessorCoor(coor, self.hiddenDim)
+      local grad_h1 = grad_h[{{}, unpack(preCoor1)}] -- N * H
+      local grad_c1 = grad_c[{{}, unpack(preCoor1)}] -- N * H
 
+      local preCoor2 = self:GetPredecessorCoor(coor, self.hiddenDim - 1 - j)
+      local grad_h2 = grad_h[{{}, unpack(preCoor2)}] -- N * H
+      local grad_c2 = grad_c[{{}, unpack(preCoor2)}] -- N * H
+      
+      -- back propagate the gradients to predecessors
+      local cn = c[{{}, unpack(coor)}] -- N * H
+      local grad_hn = grad_h[{{}, unpack(coor)}] -- N * H
+      local grad_cn = grad_c[{{}, unpack(coor)}] -- N * H
+      local curGates = self.gates[{{}, unpack(coor)}] -- N * 5H
+      local i  = curGates:narrow(2, 1, H)
+      local f1 = curGates:narrow(2, H + 1, H)
+      local f2 = curGates:narrow(2, 2 * H + 1, H)
+      local o  = curGates:narrow(2, 3 * H + 1, H)
+      local g  = curGates:narrow(2, 4 * H + 1, H)
+
+      local grad_a = self.grad_a:zero() -- gradients of activations
+      local grad_ai  = grad_a:narrow(2, 1, H)
+      local grad_af1 = grad_a:narrow(2, H + 1, H)
+      local grad_af2 = grad_a:narrow(2, 2 * H + 1, H)
+      local grad_ao  = grad_a:narrow(2, 3 * H + 1, H)
+      local grad_ag  = grad_a:narrow(2, 4 * H + 1, H)
+
+      -- We will use grad_ai, grad_af, and grad_ao as temporary buffers to compute grad_cn. 
+      -- We will need tanh_next_c (stored in grad_ai) to compute grad_ao; 
+      -- the other values can be overwritten after we compute grad_cn
+      local tanh_next_c = grad_ai:tanh(next_c) -- grad_ai is used as a buffer
+      local tanh_next_c2 = grad_af1:cmul(tanh_next_c, tanh_next_c) -- grad_af1 is used as a buffer
+      local my_grad_cn = grad_ao -- grad_ao is used as a buffer
+      my_grad_cn:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_hn)
+      grad_cn:add(my_grad_cn) -- accumulate the gradient of cell from hidden state (not the next time step)
+
+      -- We need tanh_next_c (currently in grad_ai) to compute grad_ao; after that we can overwrite it.
+      grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_hn)
+
+      -- Use grad_ai as a temporary buffer for computing grad_ag
+      local g2 = grad_ai:cmul(g, g)
+      grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_cn)
+
+      -- We don't need any temporary storage for these so do them last
+      grad_ai:fill(1):add(-1, i):cmul(i):cmul(g):cmul(grad_cn)
+      grad_af1:fill(1):add(-1, f1):cmul(f1):cmul(c1):cmul(grad_cn)
+      grad_af2:fill(1):add(-1, f2):cmul(f2):cmul(c2):cmul(grad_cn)
+ 
+      -- temporally accumulate the gradients of parameters, as they are shared
+      grad_w1:addmm(scale, h1:t(), grad_a)
+      grad_w2:addmm(scale, h2:t(), grad_a)
+
+      grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
+      grad_b:add(scale, grad_b_sum)
+
+      if gradIndicator[{unpack(preCoor1)}] == 0
+        grad_h1:mm(grad_a, w1:t())
+        grad_c1:mm(grad_cn, f1)
+        gradIndicator[{unpack(preCoor1)}] = 1
+      else
+        grad_h1:addmm(grad_a, w1:t())
+        grad_c1:addmm(grad_cn, f1)
+      end
+
+      if gradIndicator[{unpack(preCoor2)}] == 0
+        grad_h2:mm(grad_a, w1:t())
+        grad_c2:mm(grad_cn, f2)
+        gradIndicator[{unpack(preCoor2)}] = 1
+      else
+        grad_h2:addmm(grad_a, w1:t())
+        grad_c2:addmm(grad_cn, f2)
+      end
+
+-- bang ding shu chu
   grad_x:resizeAs(x):zero()
   local grad_hn = self.grad_hn:zero()
   local grad_cn = self.grad_cn:zero()
 
-  for t = T, 1, -1 do
-    local next_h, next_c = h[{{}, t}], c[{{}, t}]
-    local prev_h, prev_c = nil, nil
-    if t == 1 then
-      prev_h, prev_c = h0, c0
-    else
-      prev_h, prev_c = h[{{}, t - 1}], c[{{}, t - 1}]
-    end
-    grad_hn:add(grad_y[{{}, t}]) -- add the gradient from upper layer (not the next time step)
-
-    local i = self.gates[{{}, t, {1, H}}]
-    local f = self.gates[{{}, t, {H + 1, 2 * H}}]
-    local o = self.gates[{{}, t, {2 * H + 1, 3 * H}}]
-    local g = self.gates[{{}, t, {3 * H + 1, 4 * H}}]
-    
-    local grad_a = self.grad_a:zero() -- gradients of activations
-    local grad_ai = grad_a[{{}, {1, H}}]
-    local grad_af = grad_a[{{}, {H + 1, 2 * H}}]
-    local grad_ao = grad_a[{{}, {2 * H + 1, 3 * H}}]
-    local grad_ag = grad_a[{{}, {3 * H + 1, 4 * H}}]
-    
-    -- We will use grad_ai, grad_af, and grad_ao as temporary buffers
-    -- to compute grad_cn. We will need tanh_next_c (stored in grad_ai)
-    -- to compute grad_ao; the other values can be overwritten after we compute
-    -- grad_cn
-    local tanh_next_c = grad_ai:tanh(next_c) -- grad_ai is used as a buffer
-    local tanh_next_c2 = grad_af:cmul(tanh_next_c, tanh_next_c) -- grad_af is used as a buffer
-    local my_grad_cn = grad_ao -- grad_ao is used as a buffer
-    my_grad_cn:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_hn)
-    grad_cn:add(my_grad_cn) -- accumulate the gradient of cell from hidden state (not the next time step)
-    
-    -- We need tanh_next_c (currently in grad_ai) to compute grad_ao; after that we can overwrite it.
-    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_hn)
-
-    -- Use grad_ai as a temporary buffer for computing grad_ag
-    local g2 = grad_ai:cmul(g, g)
-    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_cn)
-
-    -- We don't need any temporary storage for these so do them last
-    grad_ai:fill(1):add(-1, i):cmul(i):cmul(g):cmul(grad_cn)
-    grad_af:fill(1):add(-1, f):cmul(f):cmul(prev_c):cmul(grad_cn)
-    
-    grad_x[{{}, t}]:mm(grad_a, w1:t()) -- (N by 4H) * (4H by D) = N by D
-    grad_w1:addmm(scale, x[{{}, t}]:t(), grad_a) -- temporally accumulate the gradients of parameters, as they are shared
-    grad_w2:addmm(scale, prev_h:t(), grad_a)
-    self.grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
-    grad_b:add(scale, self.grad_b_sum)
-
-    grad_hn:mm(grad_a, w2:t()) -- (N by 4H) * (4H by H) = N by H
-    grad_cn:cmul(f)
-  end
-
+ 
+  self.input:set()
+  self.gradOutput:set()
   return self.gradInput
 end
 
