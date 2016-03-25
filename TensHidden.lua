@@ -39,7 +39,7 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
       self.nodeNum = self.nodeNum * v
   end
   
-  local H, N = self.nodeSize, self.batchSize
+  local H = self.nodeSize
   self.weight = torch.Tensor(2 * H, 5 * H) -- input gate, forget gate1, forget gate2, output gate, new content
   self.gradWeight = torch.Tensor(2 * H, 5 * H):zero()
   self.bias = torch.Tensor(5 * H)
@@ -187,16 +187,16 @@ function hidden:CheckSize(input, gradOutput)
 end
 
 
-function self:MoveCoor(currentCoor, step) -- step must be 1 or -1
+function self:MoveCoor(curCoor, step) -- step must be 1 or -1
 
-  for i = #currentCoor, 1, -1 do
-    currentCoor[i] = currentCoor[i] + step
-    if currentCoor[i] > 0 and currentCoor[i] <= self.hiddenShape[i] then
+  for i = #curCoor, 1, -1 do
+    curCoor[i] = curCoor[i] + step
+    if curCoor[i] > 0 and curCoor[i] <= self.hiddenShape[i] then
       break
-    elseif currentCoor[i] == 0 then
-      currentCoor[i] = self.hiddenShape[i]
+    elseif curCoor[i] == 0 then
+      curCoor[i] = self.hiddenShape[i]
     else
-      currentCoor[i] = 1
+      curCoor[i] = 1
     end
   end
 end
