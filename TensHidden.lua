@@ -46,62 +46,15 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   self.gradBias = torch.Tensor(5 * H):zero()
   self:reset()
   
-  local sz = {N}
-  for _, v in ipairs(self.hiddenShape) do
-    table.insert(sz, v + 1)
-  end
-  table.insert(sz, 2 * H)
-  self.buffer1 = torch.Tensor(unpack(sz)):zero()
-
-  local stateRegion, stateGradRegion = {1, N}, {1, N}
-  local outputRegion, gradInputRegion, gradOutputRegion = {1, N}, {1, N}, {1, N}
-  for i, v in ipairs(self.hiddenShape) do
-    table.insert(stateRegion, 1); table.insert(stateRegion, v)
-    table.insert(stateGradRegion, 1); table.insert(stateGradRegion, v + 1)
-    if i <= self.inputDim then
-      table.insert(outputRegion, 1); table.insert(outputRegion, v)
-      table.insert(gradInputRegion, 2); table.insert(gradInputRegion, v + 1)
-      table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
-    else
-      table.insert(outputRegion, v); table.insert(outputRegion, v)
-      table.insert(gradInputRegion, 1); table.insert(gradInputRegion, 1)
-      table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
-    end
-  end
-  local states = buffer1:sub(unpack(stateRegion))
-  local stateGrads = buffer1:sub(unpack(stateGradRegion))
-  self.output = buffer1:sub(unpack(outputRegion))
-  self.gradInput = buffer1:sub(unpack(gradInputRegion))
-  self.gradOutput = buffer1:sub(unpack(gradOutputRegion))
-
-  local S = self.totalDim
-  self.h = states:narrow(S, 1, H)
-  self.c = states:narrow(S, H + 1, H)
-  self.grad_h = stateGrads:narrow(S, 1, H)
-  self.grad_c = stateGrads:narrow(S, H + 1, H)
-
-  for i, v in ipairs(self.hiddenShape) do
-    sz[1 + i] = v
-  end
-  sz[#sz] = 5 * H
-  self.gates = torch.Tensor(unpack(sz)):zero() -- This will be (N, unpack(self.hiddenShape), 5H)
-
-  self.grad_b_sum = torch.Tensor(1, 5 * H) -- This will be (1, 5H)
-  self.grad_a = torch.Tensor(N, 5 * H) -- This will be (N, 5H)
+  self.stateAndGradBuff = torch.Tensor()
+  self.gates = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), 5H)
+  self.grad_b_sum = torch.Tensor() -- This will be (1, 5H)
+  self.grad_a = torch.Tensor() -- This will be (N, 5H)
+  self.gradIndicator = torch.ByteTensor()
 
   self.h0 = torch.Tensor()
   self.c0 = torch.Tensor()
   self.remember_states = false
-
-  sz = {}
-  for _, v in ipairs(self.hiddenShape) do
-    table.insert(sz, v + 1)
-  end
-  self.gradIndicator = torch.ByteTensor(unpack(sz)):zero()
-  table.remove(gradOutputRegion, 1)
-  table.remove(gradOutputRegion, 1)
-  self.gradIndicator:sub(unpack(gradOutputRegion)):fill(1)
-
 end
 
 
@@ -115,27 +68,103 @@ function hidden:reset(std)
   self.bias[{{self.nodeSize + 1, 3 * self.nodeSize}}]:fill(1) -- set the bias of forget gates to 1
   self.weight:normal(0, std)
   return self
-
 end
 
 
 function hidden:resetStates()
-  -- reset h0 and c0
+  -- clear initial states h0 and c0
 
   self.h0 = self.h0.new()
   self.c0 = self.c0.new()
+end
 
+
+function hidden:InitState()
+
+  local H, N = self.nodeSize, self.batchSize
+
+  if self.stateAndGradBuff:nElement() == 0 then
+    local sz = {N}
+    for _, v in ipairs(self.hiddenShape) do
+      table.insert(sz, v + 1)
+    end
+    table.insert(sz, 2 * H)
+    self.stateAndGradBuff:resize(unpack(sz)):zero()
+
+    local stateRegion, gradRegion = {1, N}, {1, N}
+    local outputRegion, gradInputRegion, gradOutputRegion = {1, N}, {1, N}, {1, N}
+    for i, v in ipairs(self.hiddenShape) do
+      table.insert(stateRegion, 1); table.insert(stateRegion, v)
+      table.insert(gradRegion, 1); table.insert(gradRegion, v + 1)
+      if i <= self.inputDim then
+        table.insert(outputRegion, 1); table.insert(outputRegion, v)
+        table.insert(gradInputRegion, 2); table.insert(gradInputRegion, v + 1)
+        table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
+      else
+        table.insert(outputRegion, v); table.insert(outputRegion, v)
+        table.insert(gradInputRegion, 1); table.insert(gradInputRegion, 1)
+        table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
+      end
+    end
+    local states = stateAndGradBuff:sub(unpack(stateRegion))
+    local grads = stateAndGradBuff:sub(unpack(gradRegion))
+    self.output = stateAndGradBuff:sub(unpack(outputRegion))
+    self.gradInput = stateAndGradBuff:sub(unpack(gradInputRegion))
+    self.gradOutput = stateAndGradBuff:sub(unpack(gradOutputRegion))
+
+    local S = self.totalDim
+    self.h = states:narrow(S, 1, H)
+    self.c = states:narrow(S, H + 1, H)
+    self.grad_h = grads:narrow(S, 1, H)
+    self.grad_c = grads:narrow(S, H + 1, H)
+  end
+
+  if self.gates:nElement() == 0 then
+    local sz = {N}
+    for _, v in ipairs(self.hiddenShape) do
+      table.insert(sz, v)
+    end
+    table.insert(sz, 5 * H)
+    self.gates:resize(unpack(sz)):zero() -- This will be (N, unpack(self.hiddenShape), 5H)
+  end
+
+  if self.grad_b_sum:nElement() == 0 then
+    self.grad_b_sum:resize(1, 5 * H):zero() -- This will be (1, 5H)
+  end
+
+  if self.grad_a:nElement() == 0 then
+    self.grad_a:resize(N, 5 * H):zero() -- This will be (N, 5H)
+  end
+
+  if self.gradIndicator:nElement() == 0 then
+    sz = {}
+    for _, v in ipairs(self.hiddenShape) do
+      table.insert(sz, v + 1)
+    end
+    self.gradIndicator:resize(unpack(sz)):zero()
+
+    local gradOutputRegion = {1, N}
+    for i, v in ipairs(self.hiddenShape) do
+      if i <= self.inputDim then
+        table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
+      else
+        table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
+      end
+    end
+    self.gradIndicator:sub(unpack(gradOutputRegion)):fill(1)
+  end
 end
 
 
 function hidden:clearState()
-  -- clear intermediate variables
+  -- clear intermediate variables (the original clearState() in 'nn.Module' is overloaded, 
+  -- as it only clears 'output' and 'gradInput')
 
-  self.buffer1:set()
+  self.stateAndGradBuff:set()
   self.gates:set()
   self.grad_b_sum:set()
   self.grad_a:set()
-
+  self.gradIndicator:set()
 end
 
 
@@ -155,7 +184,6 @@ function hidden:CheckSize(input, gradOutput)
       assert(gradOutput:size(i) == v)
     end
   end
-
 end
 
 
@@ -171,28 +199,6 @@ function self:MoveCoor(currentCoor, step) -- step must be 1 or -1
       currentCoor[i] = 1
     end
   end
-
-end
-
-
-function self:InitGradIndicator()
-
-  local sz = {}
-  for _, v in ipairs(self.hiddenShape) do
-    table.insert(sz, v + 1)
-  end
-  self.gradIndicator:resize(unpack(sz)):zero()
-
-  local gradOutputRegion = {}
-  for i, v in ipairs(self.hiddenShape) do
-    if i <= self.inputDim then
-      table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
-    else
-      table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
-    end
-  end
-  self.gradIndicator:sub(unpack(gradOutputRegion))
-
 end
 
 
@@ -246,11 +252,10 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   end
 
   return hp, cp
-
 end
 
 
-function hidden:GetPredecessorGrad(curCoor, predecessorDim)
+function hidden:GetPredecessorGrad(curCoor, predecessorDim, gradIndicator)
 
   local preCoor = {}
   for i, v in ipairs(curCoor) do
@@ -273,15 +278,23 @@ function hidden:GetPredecessorGrad(curCoor, predecessorDim)
 
   local grad_hp = self.grad_h[{{}, unpack(preCoor)}] -- N * H
   local grad_cp = self.grad_c[{{}, unpack(preCoor)}] -- N * H
+  
+  -- if there's no gradient in a predecessor, we overwrite it with a back propagated gradient,
+  -- otherwise we accumulate the back propagated gradient
+  local isGrad = true
+  if gradIndicator[{unpack(preCoor)}] == 0 then -- no gradient in a predecessor
+    isGrad = false
+    gradIndicator[{unpack(preCoor)}] = 1 
+  end
 
-  return grad_hp, grad_cp
-
+  return grad_hp, grad_cp, isGrad
 end
 
 
 function hidden:updateOutput(input)
   
   self:CheckSize(input)
+  self:InitState()
   
   local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
@@ -338,7 +351,6 @@ function hidden:updateOutput(input)
   end
 
   return self.output
-
 end
 
 
@@ -360,7 +372,6 @@ function hidden:backward(input, gradOutput, scale)
   local grad_w2 = self.gradWeight[{{H + 1, 2 * H}}]
   local grad_b = self.gradBias
   local grad_b_sum = self.grad_b_sum
-
   local gradIndicator = self.gradIndicator:clone()
 
   -- initialize the coordinate of current node
@@ -377,8 +388,8 @@ function hidden:backward(input, gradOutput, scale)
     local h2, c2 = self:GetPredecessorState(input, coor, self.hiddenDim - 1 - decompNodeId)
 
     -- get the predecessor gradients
-    local grad_h1, grad_c1 = self:GetPredecessorGrad(coor, self.hiddenDim)
-    local grad_h2, grad_c2 = self:GetPredecessorGrad(coor, self.hiddenDim - 1 - decompNodeId)
+    local grad_h1, grad_c1, isGrad1 = self:GetPredecessorGrad(coor, self.hiddenDim, gradIndicator)
+    local grad_h2, grad_c2, isGrad2 = self:GetPredecessorGrad(coor, self.hiddenDim - 1 - decompNodeId, gradIndicator)
     
     -- back propagate the gradients to predecessors
     local cn = c[{{}, unpack(coor)}] -- N * H
@@ -426,40 +437,34 @@ function hidden:backward(input, gradOutput, scale)
     grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
     grad_b:add(scale, grad_b_sum)
 
-    if gradIndicator[{unpack(preCoor1)}] == 0 then -- if no previous gradient, we overwrite it
+    if not isGrad1 then -- if no previous gradient, we overwrite it
       grad_h1:mm(grad_a, w1:t())
       grad_c1:mm(grad_cn, f1)
-      gradIndicator[{unpack(preCoor1)}] = 1
     else -- if previous gradient exists, we accumulate it
       grad_h1:addmm(grad_a, w1:t())
       grad_c1:addmm(grad_cn, f1)
     end
 
-    if gradIndicator[{unpack(preCoor2)}] == 0 then -- if no previous gradient, we overwrite it 
+    if not isGrad2 then -- if no previous gradient, we overwrite it 
       grad_h2:mm(grad_a, w1:t())
       grad_c2:mm(grad_cn, f2)
-      gradIndicator[{unpack(preCoor2)}] = 1 
     else -- if previous gradient exists, we accumulate it
       grad_h2:addmm(grad_a, w1:t())
       grad_c2:addmm(grad_cn, f2)
     end
+    
     coor = self:MoveCoor(coor, -1)
   end
 
   return self.gradInput
-
 end
 
 
 function hidden:updateGradInput(input, gradOutput)
-
   return self:backward(input, gradOutput, 0)
-
 end
 
 
 function hidden:accGradParameters(input, gradOutput, scale)
-
   self:backward(input, gradOutput, scale)
-
 end
