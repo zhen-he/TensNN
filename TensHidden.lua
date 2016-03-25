@@ -38,6 +38,7 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   self.gradWeight = torch.Tensor(2 * H, 5 * H):zero()
   self.bias = torch.Tensor(5 * H)
   self.gradBias = torch.Tensor(5 * H):zero()
+  self:reset()
   
   local sz = {N}
   for _, v in ipairs(self.hiddenShape) do
@@ -86,8 +87,6 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   self.c0 = torch.Tensor()
   self.remember_states = false
 
-  self.input = torch.Tensor()
-
   sz = {}
   for _, v in ipairs(self.hiddenShape) do
     table.insert(sz, v + 1)
@@ -97,11 +96,12 @@ function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
   table.remove(gradOutputRegion, 1)
   self.gradIndicator:sub(unpack(gradOutputRegion)):fill(1)
 
-  self:reset()
 end
 
--- reset weights and bias
+
 function hidden:reset(std)
+  -- initialize weights and bias
+
   if not std then
     std = 1.0 / math.sqrt(self.nodeSize * 2)
   end
@@ -111,10 +111,21 @@ function hidden:reset(std)
   return self
 end
 
--- reset h0 and c0
+
 function hidden:resetStates()
+  -- reset h0 and c0
+
   self.h0 = self.h0.new()
   self.c0 = self.c0.new()
+end
+
+
+function hidden:clearState()
+
+  self.buffer1:set()
+  self.gates:set()
+  self.grad_b_sum:set()
+  self.grad_a:set()
 end
 
 function hidden:CheckSize()
@@ -130,6 +141,7 @@ function hidden:CheckSize()
 
 end
 
+
 function self:MoveCoor(currentCoor, step) -- step should be 1 or -1
 
   for i = #currentCoor, 1, -1 do
@@ -137,9 +149,9 @@ function self:MoveCoor(currentCoor, step) -- step should be 1 or -1
     if currentCoor[i] > 0 and currentCoor[i] <= self.hiddenShape[i] then
       break
     elseif currentCoor[i] == 0 then
-        currentCoor[i] = self.hiddenShape[i]
+      currentCoor[i] = self.hiddenShape[i]
     else
-        currentCoor[i] = 1
+      currentCoor[i] = 1
     end
   end
 
@@ -258,14 +270,14 @@ function hidden:updateOutput(input)
   if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
     h0:resizeAs(h0_):zero()
   else -- if remember, use the previous evaluated h as h0
-    h0 = h0_:clone()
+    h0:copy(h0_)
   end
 
   local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim])
   if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
     c0:resizeAs(c0_):zero()
   else -- if remember, use the previous evaluated c as c0
-    c0 = c0_:clone()
+    c0:copy(c0_)
   end
 
   local bias_expand = self.bias:view(1, 5 * H):expand(N, 5 * H) -- copy the bias for a batch
@@ -308,7 +320,6 @@ function hidden:updateOutput(input)
     end
   end
 
-  self.input:set()
   return self.output
 end
 
@@ -318,7 +329,7 @@ function hidden:backward(input, gradOutput, scale)
   self.input = input
   self:CheckSize()
 
-  self.gradOutput = gradOutput:clone()
+  self.gradOutput:copy(gradOutput)
   scale = scale or 1.0
 
   local H, N = self.nodeSize, self.batchSize
@@ -327,8 +338,6 @@ function hidden:backward(input, gradOutput, scale)
   local grad_h = self.grad_h
   local grad_c = self.grad_c
 
-  local grad_x = self.gradInput
-  
   local w1 = self.weight[{{1, H}}]
   local w2 = self.weight[{{H + 1, 2 * H}}]
   local grad_w1 = self.gradWeight[{{1, H}}]
@@ -344,8 +353,6 @@ function hidden:backward(input, gradOutput, scale)
     coor[i] = self.hiddenShape[i]
   end
 
-  local grad_h2, grad_c2 = torch.Tensor(), torch.Tensor()
-
   for i = self.nodeNum / self.decompNum, 1, -1 do
     for j = self.decompNum, 0, -1 do
 
@@ -354,13 +361,13 @@ function hidden:backward(input, gradOutput, scale)
       local h2, c2 = self:GetPredecessorState(coor, self.hiddenDim - 1 - j)
 
       -- point to the gradients of the predecessors
-      local preCoor1 = self:GetPredecessorCoor(coor, self.hiddenDim)
-      local grad_h1 = grad_h[{{}, unpack(preCoor1)}] -- N * H
-      local grad_c1 = grad_c[{{}, unpack(preCoor1)}] -- N * H
+      local pre1Coor = self:GetPredecessorCoor(coor, self.hiddenDim)
+      local grad_h1 = grad_h[{{}, unpack(pre1Coor)}] -- N * H
+      local grad_c1 = grad_c[{{}, unpack(pre1Coor)}] -- N * H
 
-      local preCoor2 = self:GetPredecessorCoor(coor, self.hiddenDim - 1 - j)
-      local grad_h2 = grad_h[{{}, unpack(preCoor2)}] -- N * H
-      local grad_c2 = grad_c[{{}, unpack(preCoor2)}] -- N * H
+      local pre2Coor = self:GetPredecessorCoor(coor, self.hiddenDim - 1 - j)
+      local grad_h2 = grad_h[{{}, unpack(pre2Coor)}] -- N * H
+      local grad_c2 = grad_c[{{}, unpack(pre2Coor)}] -- N * H
       
       -- back propagate the gradients to predecessors
       local cn = c[{{}, unpack(coor)}] -- N * H
@@ -408,46 +415,29 @@ function hidden:backward(input, gradOutput, scale)
       grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
       grad_b:add(scale, grad_b_sum)
 
-      if gradIndicator[{unpack(preCoor1)}] == 0
+      if gradIndicator[{unpack(preCoor1)}] == 0 then -- if no previous gradient, we overwrite it
         grad_h1:mm(grad_a, w1:t())
         grad_c1:mm(grad_cn, f1)
         gradIndicator[{unpack(preCoor1)}] = 1
-      else
+      else -- if previous gradient exists, we accumulate it
         grad_h1:addmm(grad_a, w1:t())
         grad_c1:addmm(grad_cn, f1)
       end
 
-      if gradIndicator[{unpack(preCoor2)}] == 0
+      if gradIndicator[{unpack(preCoor2)}] == 0 then -- if no previous gradient, we overwrite it 
         grad_h2:mm(grad_a, w1:t())
         grad_c2:mm(grad_cn, f2)
-        gradIndicator[{unpack(preCoor2)}] = 1
-      else
+        gradIndicator[{unpack(preCoor2)}] = 1 
+      else -- if previous gradient exists, we accumulate it
         grad_h2:addmm(grad_a, w1:t())
         grad_c2:addmm(grad_cn, f2)
       end
 
--- bang ding shu chu
-  grad_x:resizeAs(x):zero()
-  local grad_hn = self.grad_hn:zero()
-  local grad_cn = self.grad_cn:zero()
+      coor = self:MoveCoor(coor, 1)
+    end
+  end
 
- 
-  self.input:set()
-  self.gradOutput:set()
   return self.gradInput
-end
-
-
-function hidden:clearState()
-  self.cell:set()
-  self.gates:set()
-  self.grad_hn:set()
-  self.grad_cn:set()
-  self.grad_b_sum:set()
-  self.grad_a:set()
-
-  self.grad_x:set()
-  self.output:set()
 end
 
 
@@ -459,4 +449,3 @@ end
 function hidden:accGradParameters(input, gradOutput, scale)
   self:backward(input, gradOutput, scale)
 end
-
