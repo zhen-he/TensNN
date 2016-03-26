@@ -7,8 +7,8 @@ local hidden, parent = torch.class('nn.TensHidden', 'nn.Module')
 
 function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
 
-  assert(#inputShape > 1, 'invalid input shape')
-  assert(#tensShape > 1, 'invalid tensorizing shape')
+  assert(#inputShape > 0, 'invalid input shape')
+  assert(#tensShape > 0, 'invalid tensorizing shape')
   assert(nodeSize > 0, 'invalid node size')
   assert(batchSize > 0, 'invalid batch size')
 
@@ -106,11 +106,11 @@ function hidden:InitState()
         table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
       end
     end
-    local states = stateAndGradBuff:sub(unpack(stateRegion))
-    local grads = stateAndGradBuff:sub(unpack(gradRegion))
-    self.output = stateAndGradBuff:sub(unpack(outputRegion))
-    self.gradInput = stateAndGradBuff:sub(unpack(gradInputRegion))
-    self.gradOutput = stateAndGradBuff:sub(unpack(gradOutputRegion))
+    local states = self.stateAndGradBuff:sub(unpack(stateRegion))
+    local grads = self.stateAndGradBuff:sub(unpack(gradRegion))
+    self.output = self.stateAndGradBuff:sub(unpack(outputRegion))
+    self.gradInput = self.stateAndGradBuff:sub(unpack(gradInputRegion))
+    self.gradOutput = self.stateAndGradBuff:sub(unpack(gradOutputRegion))
 
     local S = self.totalDim
     self.h = states:narrow(S, 1, H)
@@ -143,7 +143,7 @@ function hidden:InitState()
     end
     self.gradIndicator:resize(unpack(sz)):zero()
 
-    local gradOutputRegion = {1, N}
+    local gradOutputRegion = {}
     for i, v in ipairs(self.hiddenShape) do
       if i <= self.inputDim then
         table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
@@ -187,7 +187,7 @@ function hidden:CheckSize(input, gradOutput)
 end
 
 
-function self:MoveCoor(curCoor, step) -- step must be 1 or -1
+function hidden:MoveCoor(curCoor, step) -- step must be 1 or -1
 
   for i = #curCoor, 1, -1 do
     curCoor[i] = curCoor[i] + step
@@ -282,9 +282,9 @@ function hidden:GetPredecessorGrad(curCoor, predecessorDim, gradIndicator)
   -- if there's no gradient in a predecessor, we overwrite it with a back propagated gradient,
   -- otherwise we accumulate the back propagated gradient
   local isGrad = true
-  if gradIndicator[{unpack(preCoor)}] == 0 then -- no gradient in a predecessor
+  if gradIndicator[preCoor] == 0 then -- no gradient in a predecessor
     isGrad = false
-    gradIndicator[{unpack(preCoor)}] = 1 
+    gradIndicator[preCoor] = 1 
   end
 
   return grad_hp, grad_cp, isGrad
@@ -347,7 +347,7 @@ function hidden:updateOutput(input)
     hn:cmul(i, g) -- gated new contents
     cn:cmul(f1, c1):addcmul(f2, c2):add(hn) -- new memories
     hn:tanh(cn):cmul(o) -- new hidden states
-    coor = self:MoveCoor(coor, 1)
+    self:MoveCoor(coor, 1)
   end
 
   return self.output
@@ -453,7 +453,7 @@ function hidden:backward(input, gradOutput, scale)
       grad_c2:addmm(grad_cn, f2)
     end
     
-    coor = self:MoveCoor(coor, -1)
+    self:MoveCoor(coor, -1)
   end
 
   return self.gradInput
