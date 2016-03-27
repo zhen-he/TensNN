@@ -89,34 +89,54 @@ function hidden:InitState()
       table.insert(sz, v + 1)
     end
     table.insert(sz, 2 * H)
-    self.stateAndGradBuff:resize(unpack(sz)):zero()
-
-    local stateRegion, gradRegion = {1, N}, {1, N}
-    local outputRegion, gradInputRegion, gradOutputRegion = {1, N}, {1, N}, {1, N}
+    self.stateAndGradBuff:resize(torch.LongStorage(sz)):zero()
+    local stateRegion, gradRegion = {{}}, {{}}
+    local outputRegion, gradInputRegion, gradOutputRegion = {{}}, {{}}, {{}}
+    local gradInitStateRegion = {{}}
     for i, v in ipairs(self.hiddenShape) do
-      table.insert(stateRegion, 1); table.insert(stateRegion, v)
-      table.insert(gradRegion, 1); table.insert(gradRegion, v + 1)
-      if i <= self.inputDim then
-        table.insert(outputRegion, 1); table.insert(outputRegion, v)
-        table.insert(gradInputRegion, 2); table.insert(gradInputRegion, v + 1)
-        table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
-      else
-        table.insert(outputRegion, v); table.insert(outputRegion, v)
-        table.insert(gradInputRegion, 1); table.insert(gradInputRegion, 1)
-        table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
+      table.insert(stateRegion, {1, v})
+      table.insert(gradRegion, {1, v + 1})
+      if i < self.inputDim then -- the input dimension (except the last one)
+        table.insert(outputRegion, {1, v})
+        table.insert(gradInputRegion, {2, v + 1})
+        table.insert(gradOutputRegion, {2, v + 1})
+        table.insert(gradInitStateRegion, {2, v + 1})
+      elseif i == self.inputDim then -- the last input dimension
+        table.insert(outputRegion, {1, v})
+        table.insert(gradInputRegion, {2, v + 1})
+        table.insert(gradOutputRegion, {2, v + 1})
+        table.insert(gradInitStateRegion, 1)
+      elseif i < self.hiddenDim - 1 then -- the tensorized dimension (except the last one)
+        table.insert(outputRegion, v)
+        table.insert(gradInputRegion, 2)
+        table.insert(gradOutputRegion, v + 1)
+        table.insert(gradInitStateRegion, {2, v + 1})
+      elseif i == self.hiddenDim - 1 then -- the last tensorized dimension
+        table.insert(outputRegion, v)
+        table.insert(gradInputRegion, 1)
+        table.insert(gradOutputRegion, v + 1)
+        table.insert(gradInitStateRegion, {2, v + 1})
+      else -- the decomposing dimension
+        table.insert(outputRegion, v)
+        table.insert(gradInputRegion, v + 1)
+        table.insert(gradOutputRegion, v + 1)
+        table.insert(gradInitStateRegion, v + 1)
       end
     end
-    local states = self.stateAndGradBuff:sub(unpack(stateRegion))
-    local grads = self.stateAndGradBuff:sub(unpack(gradRegion))
-    self.output = self.stateAndGradBuff:sub(unpack(outputRegion))
-    self.gradInput = self.stateAndGradBuff:sub(unpack(gradInputRegion))
-    self.gradOutput = self.stateAndGradBuff:sub(unpack(gradOutputRegion))
+    local states = self.stateAndGradBuff[stateRegion]
+    local grads = self.stateAndGradBuff[gradRegion]
+    self.output = self.stateAndGradBuff[outputRegion]
+    self.grad_x = self.stateAndGradBuff[gradInputRegion]
+    self.gradOutput = self.stateAndGradBuff[gradOutputRegion]
+    local grad_h0c0 = self.stateAndGradBuff[gradInitStateRegion]
 
     local S = self.totalDim
     self.h = states:narrow(S, 1, H)
     self.c = states:narrow(S, H + 1, H)
     self.grad_h = grads:narrow(S, 1, H)
     self.grad_c = grads:narrow(S, H + 1, H)
+    self.grad_h0 = grad_h0c0:narrow(grad_h0c0:dim(), 1, H)
+    self.grad_c0 = grad_h0c0:narrow(grad_h0c0:dim(), H + 1, H)
   end
 
   if self.gates:nElement() == 0 then
@@ -125,7 +145,7 @@ function hidden:InitState()
       table.insert(sz, v)
     end
     table.insert(sz, 5 * H)
-    self.gates:resize(unpack(sz)):zero() -- This will be (N, unpack(self.hiddenShape), 5H)
+    self.gates:resize(torch.LongStorage(sz)):zero() -- This will be (N, unpack(self.hiddenShape), 5H)
   end
 
   if self.grad_b_sum:nElement() == 0 then
@@ -141,17 +161,17 @@ function hidden:InitState()
     for _, v in ipairs(self.hiddenShape) do
       table.insert(sz, v + 1)
     end
-    self.gradIndicator:resize(unpack(sz)):zero()
+    self.gradIndicator:resize(torch.LongStorage(sz)):zero()
 
     local gradOutputRegion = {}
     for i, v in ipairs(self.hiddenShape) do
       if i <= self.inputDim then
-        table.insert(gradOutputRegion, 2); table.insert(gradOutputRegion, v + 1)
+        table.insert(gradOutputRegion, {2, v + 1})
       else
-        table.insert(gradOutputRegion, v + 1); table.insert(gradOutputRegion, v + 1)
+        table.insert(gradOutputRegion, v + 1)
       end
     end
-    self.gradIndicator:sub(unpack(gradOutputRegion)):fill(1)
+    self.gradIndicator[gradOutputRegion]:fill(1)
   end
 end
 
@@ -180,10 +200,25 @@ function hidden:CheckSize(input, gradOutput)
 
   if gradOutput then
     assert(gradOutput:dim() == input:dim())
-    for i, v in ipairs(input) do
-      assert(gradOutput:size(i) == v)
+    for i = 1, input:dim() do
+      assert(gradOutput:size(i) == input:size(i))
     end
   end
+end
+
+
+function hidden:UnpackInput(input)
+  local x, h0, c0 = nil, nil, nil
+  if torch.type(input) == 'table' and #input == 3 then
+    x, h0, c0 = unpack(input)
+  elseif torch.type(input) == 'table' and #input == 2 then
+    x, h0 = unpack(input)
+  elseif torch.isTensor(input) then
+    x = input
+  else
+    assert(false, 'invalid input')
+  end
+  return x, h0, c0
 end
 
 
@@ -215,20 +250,24 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
     preCoor[i] = v
   end
 
+  if predecessorDim == self.hiddenDim and preCoor[predecessorDim] == 1 then
+    predecessorDim = self.hiddenDim - 1
+  end
+  if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
+    preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
+  end
   if preCoor[predecessorDim] > 1 then
     -- point to the previous node
     preCoor[predecessorDim] = preCoor[predecessorDim] - 1
-    if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
-      preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
-    end
     hp = h[{{}, unpack(preCoor)}] -- N * H
     cp = c[{{}, unpack(preCoor)}] -- N * H
   else -- the case that requires initial states (out of the network's shape)
-    predecessorDim = math.min(predecessorDim, self.hiddenDim - 1)
     hp:resize(N, H):zero()
     cp:resize(N, H):zero()
     if predecessorDim == self.inputDim then -- get value from the last states of previous batch
-      table.remove(preCoor, predecessorDim)
+      -- as h0 (c0) are the last slice on both input dimension and decomposed dimension of h (c), we remove the corresponding coordinates
+      table.remove(preCoor, self.inputDim) -- remove the input dimension
+      table.remove(preCoor, #preCoor) -- remove the decomposing dimension
       hp = h0[{{}, unpack(preCoor)}] -- N * H
       cp = c0[{{}, unpack(preCoor)}] -- N * H
     elseif predecessorDim == self.inputDim + self.tensDim then -- get value from input
@@ -262,8 +301,8 @@ function hidden:GetPredecessorGrad(curCoor, predecessorDim, gradIndicator)
     preCoor[i] = v
   end
 
-  if preCoor[predecessorDim] == 1 then -- the case that requires initial states (out of the network's shape)
-    predecessorDim = math.min(predecessorDim, self.hiddenDim - 1)
+  if predecessorDim == self.hiddenDim and preCoor[predecessorDim] == 1 then
+    predecessorDim = self.hiddenDim - 1
   end
   if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
     preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
@@ -293,27 +332,40 @@ end
 
 function hidden:updateOutput(input)
   
-  self:CheckSize(input)
+  local x, h0, c0 = self:UnpackInput(input)
+  self:CheckSize(x)
+  self.isReturnGradH0 = (h0 ~= nil)
+  self.isReturnGradC0 = (c0 ~= nil)
   self:InitState()
-  
-  local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
-  local h0, c0 = self.h0, self.c0
 
-  local h0_ = h:select(1 + self.inputDim, self.inputShape[self.inputDim])
-  if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-    h0:resizeAs(h0_):zero()
-  else -- if remember, use the previous evaluated h as h0
-    h0:copy(h0_)
+  if h0 then
+    self.h0 = h0:clone()
+  else
+    h0 = self.h0
+    local h0_ = h:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
+    h0_ = h0_:select(h0_:dim() - 1, self.decompNum) -- the last slice on the decompesing dimension
+    if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
+      h0:resizeAs(h0_):zero()
+    else -- if remember, use the previous evaluated h as h0
+      h0:copy(h0_)
+    end
   end
 
-  local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim])
-  if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-    c0:resizeAs(c0_):zero()
-  else -- if remember, use the previous evaluated c as c0
-    c0:copy(c0_)
+  if c0 then
+    self.c0 = c0:clone()
+  else
+    c0 = self.c0
+    local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
+    c0_ = c0_:select(c0_:dim() - 1, self.decompNum) -- the last slice on the decompesed dimension
+    if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
+      c0:resizeAs(c0_):zero()
+    else -- if remember, use the previous evaluated c as c0
+      c0:copy(c0_)
+    end
   end
 
+  local H, N = self.nodeSize, self.batchSize
   local bias_expand = self.bias:view(1, 5 * H):expand(N, 5 * H) -- copy the bias for a batch
   local w1 = self.weight[{{1, H}}] -- weights for h1
   local w2 = self.weight[{{H + 1, 2 * H}}] -- weights for h2
@@ -328,8 +380,8 @@ function hidden:updateOutput(input)
     local decompNodeId = (nodeId - 1) % self.decompNum + 1
 
     -- get the predecessor states
-    local h1, c1 = self:GetPredecessorState(input, coor, self.hiddenDim)
-    local h2, c2 = self:GetPredecessorState(input, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1, c1 = self:GetPredecessorState(x, coor, self.hiddenDim)
+    local h2, c2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
 
     -- update the current node
     local hn = h[{{}, unpack(coor)}]
@@ -356,16 +408,18 @@ end
 
 function hidden:backward(input, gradOutput, scale)
 
-  self:CheckSize(input, gradOutput)
+  local x, h0, c0 = self:UnpackInput(input)
+  self:CheckSize(x, gradOutput)
   self.gradOutput:copy(gradOutput)
   scale = scale or 1.0
 
-  local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
-  local h0, c0 = self.h0, self.c0
-  local grad_h = self.grad_h
-  local grad_c = self.grad_c
+  local grad_h, grad_c = self.grad_h, self.grad_c
+  if not c0 then c0 = self.c0 end
+  if not h0 then h0 = self.h0 end
+  local grad_h0, grad_c0 = self.grad_h0, self.grad_c0
 
+  local H, N = self.nodeSize, self.batchSize
   local w1 = self.weight[{{1, H}}]
   local w2 = self.weight[{{H + 1, 2 * H}}]
   local grad_w1 = self.gradWeight[{{1, H}}]
@@ -384,8 +438,8 @@ function hidden:backward(input, gradOutput, scale)
     local decompNodeId = (nodeId - 1) % self.decompNum + 1
 
     -- get the predecessor states
-    local h1, c1 = self:GetPredecessorState(input, coor, self.hiddenDim)
-    local h2, c2 = self:GetPredecessorState(input, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1, c1 = self:GetPredecessorState(x, coor, self.hiddenDim)
+    local h2, c2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
 
     -- get the predecessor gradients
     local grad_h1, grad_c1, isGrad1 = self:GetPredecessorGrad(coor, self.hiddenDim, gradIndicator)
@@ -412,7 +466,7 @@ function hidden:backward(input, gradOutput, scale)
     -- We will use grad_ai, grad_af, and grad_ao as temporary buffers to compute grad_cn. 
     -- We will need tanh_next_c (stored in grad_ai) to compute grad_ao; 
     -- the other values can be overwritten after we compute grad_cn
-    local tanh_next_c = grad_ai:tanh(next_c) -- grad_ai is used as a buffer
+    local tanh_next_c = grad_ai:tanh(cn) -- grad_ai is used as a buffer
     local tanh_next_c2 = grad_af1:cmul(tanh_next_c, tanh_next_c) -- grad_af1 is used as a buffer
     local my_grad_cn = grad_ao -- grad_ao is used as a buffer
     my_grad_cn:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_hn)
@@ -439,21 +493,29 @@ function hidden:backward(input, gradOutput, scale)
 
     if not isGrad1 then -- if no previous gradient, we overwrite it
       grad_h1:mm(grad_a, w1:t())
-      grad_c1:mm(grad_cn, f1)
+      grad_c1:cmul(grad_cn, f1)
     else -- if previous gradient exists, we accumulate it
       grad_h1:addmm(grad_a, w1:t())
-      grad_c1:addmm(grad_cn, f1)
+      grad_c1:addcmul(grad_cn, f1)
     end
 
     if not isGrad2 then -- if no previous gradient, we overwrite it 
       grad_h2:mm(grad_a, w1:t())
-      grad_c2:mm(grad_cn, f2)
+      grad_c2:cmul(grad_cn, f2)
     else -- if previous gradient exists, we accumulate it
       grad_h2:addmm(grad_a, w1:t())
-      grad_c2:addmm(grad_cn, f2)
+      grad_c2:addcmul(grad_cn, f2)
     end
     
     self:MoveCoor(coor, -1)
+  end
+
+  if self.isReturnGradH0 and self.isReturnGradC0 then
+    self.gradInput = {self.grad_x, self.grad_h0, self.grad_c0}
+  elseif self.isReturnGradH0 then
+    self.gradInput = {self.grad_x, self.grad_h0}
+  else
+    self.gradInput = self.grad_x
   end
 
   return self.gradInput
