@@ -331,7 +331,7 @@ end
 
 
 function hidden:updateOutput(input)
-  
+
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x)
   self.isReturnGradH0 = (h0 ~= nil)
@@ -369,7 +369,7 @@ function hidden:updateOutput(input)
   local bias_expand = self.bias:view(1, 5 * H):expand(N, 5 * H) -- copy the bias for a batch
   local w1 = self.weight[{{1, H}}] -- weights for h1
   local w2 = self.weight[{{H + 1, 2 * H}}] -- weights for h2
-  
+
   -- initialize the coordinate of current node
   local coor = {}
   for i = 1, self.hiddenDim do
@@ -447,8 +447,12 @@ function hidden:backward(input, gradOutput, scale)
     
     -- back propagate the gradients to predecessors
     local cn = c[{{}, unpack(coor)}] -- N * H
-    local grad_hn = grad_h[{{}, unpack(coor)}] -- N * H
-    local grad_cn = grad_c[{{}, unpack(coor)}] -- N * H
+    local coorg = {}
+    for i, v in ipairs(coor) do
+      coorg[i] = v + 1
+    end
+    local grad_hn = grad_h[{{}, unpack(coorg)}] -- N * H
+    local grad_cn = grad_c[{{}, unpack(coorg)}] -- N * H
     local curGates = self.gates[{{}, unpack(coor)}] -- N * 5H
     local i  = curGates:narrow(2, 1, H)
     local f1 = curGates:narrow(2, H + 1, H)

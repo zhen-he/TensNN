@@ -119,13 +119,12 @@ function tests.gradcheck()
     end
   end
   table.insert(sz, H)
-  local h0 = torch.randn(torch.LongStorage(sz)):fill(1);print('\nh0:',h0)
-  local c0 = torch.randn(torch.LongStorage(sz)):fill(1);print('\nc0:',c0)
-  hidden:zeroGradParameters()
-  local dw = hidden.gradWeight:clone();print('\ndw:',dw)
-  local db = hidden.gradBias:clone();print('\ndb:',db)
+  local h0 = torch.randn(torch.LongStorage(sz)):fill(2);print('\nh0:',h0)
+  local c0 = torch.randn(torch.LongStorage(sz)):fill(2);print('\nc0:',c0)
+--hidden.weight:fill(1);hidden.bias:fill(1)
+  print('\nweght:',hidden.weight);print('\nbias:',hidden.bias)
   local y = hidden:forward({x, h0, c0});print('\ny:',y)
-  local dy = torch.randn(#y);print('\ndy:',dy)
+  local dy = torch.randn(#y):fill(1);print('\ndy:',dy)
 
   hidden:zeroGradParameters()
   local dx, dh0, dc0 = unpack(hidden:backward({x, h0, c0}, dy))
@@ -178,4 +177,3 @@ end
 
 tester:add(tests)
 tester:run()
-
