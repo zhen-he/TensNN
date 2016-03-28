@@ -504,10 +504,10 @@ function hidden:backward(input, gradOutput, scale)
     end
 
     if not isGrad2 then -- if no previous gradient, we overwrite it 
-      grad_h2:mm(grad_a, w1:t())
+      grad_h2:mm(grad_a, w2:t())
       grad_c2:cmul(grad_cn, f2)
     else -- if previous gradient exists, we accumulate it
-      grad_h2:addmm(grad_a, w1:t())
+      grad_h2:addmm(grad_a, w2:t())
       grad_c2:addcmul(grad_cn, f2)
     end
     

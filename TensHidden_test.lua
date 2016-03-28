@@ -19,30 +19,30 @@ end
 
 function tests.testForward()
 
-  local inputShape = {7}
-  local tensShape = {5}
+  local inputShape = {3,4}
+  local tensShape = {2,3}
   local nodeSize = 3
   local batchSize = 2
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
 
   local N, H = batchSize, nodeSize
-  local sz = {N}
+  local sz_x = {N}
   for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz, v)
+    table.insert(sz_x, v)
   end
-  table.insert(sz, 2 * H)
-  local x  = torch.randn(torch.LongStorage(sz))
+  table.insert(sz_x, 2 * H)
+  local x  = torch.randn(torch.LongStorage(sz_x))
 
-  sz = {N}
+  local sz_h = {N}
   for i, v in ipairs(hidden.hiddenShape) do
     if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz, v)
+      table.insert(sz_h, v)
     end
   end
-  table.insert(sz, H)
-  local h0 = torch.randn(torch.LongStorage(sz))
-  local c0 = torch.randn(torch.LongStorage(sz))
+  table.insert(sz_h, H)
+  local h0 = torch.randn(torch.LongStorage(sz_h))
+  local c0 = torch.randn(torch.LongStorage(sz_h))
 
   local y = hidden:forward({x, h0, c0})
   y = y:clone()
@@ -97,42 +97,41 @@ end
 
 function tests.gradcheck()
   
-  local inputShape = {1}
-  local tensShape = {1}
-  local nodeSize = 1
-  local batchSize = 1
+  local inputShape = {3,3}
+  local tensShape = {2,2}
+  local nodeSize = 2
+  local batchSize = 2
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
 
   local N, H = batchSize, nodeSize
-  local sz = {N}
+  local sz_x = {N}
   for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz, v)
+    table.insert(sz_x, v)
   end
-  table.insert(sz, 2 * H)
-  local x  = torch.randn(torch.LongStorage(sz)):fill(1);print('\nx:',x)
+  table.insert(sz_x, 2 * H)
+  local x  = torch.randn(torch.LongStorage(sz_x))
 
-  sz = {N}
+  local sz_h = {N}
   for i, v in ipairs(hidden.hiddenShape) do
     if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz, v)
+      table.insert(sz_h, v)
     end
   end
-  table.insert(sz, H)
-  local h0 = torch.randn(torch.LongStorage(sz)):fill(2);print('\nh0:',h0)
-  local c0 = torch.randn(torch.LongStorage(sz)):fill(2);print('\nc0:',c0)
---hidden.weight:fill(1);hidden.bias:fill(1)
-  print('\nweght:',hidden.weight);print('\nbias:',hidden.bias)
-  local y = hidden:forward({x, h0, c0});print('\ny:',y)
-  local dy = torch.randn(#y):fill(1);print('\ndy:',dy)
+  table.insert(sz_h, H)
+  local h0 = torch.randn(torch.LongStorage(sz_h))
+  local c0 = torch.randn(torch.LongStorage(sz_h))
+
+  local y = hidden:forward({x, h0, c0})
+  local dy = torch.randn(#y)
 
   hidden:zeroGradParameters()
   local dx, dh0, dc0 = unpack(hidden:backward({x, h0, c0}, dy))
-  dx = dx:clone();print('\ndx:',dx)
-  dh0 = dh0:clone();print('\ndh0:',dh0)
-  dc0 = dc0:clone();print('\ndc0:',dc0)
-  local dw = hidden.gradWeight:clone();print('\ndw:',dw)
-  local db = hidden.gradBias:clone();print('\ndb:',db)
+  dx = dx:clone()
+  dh0 = dh0:clone()
+  dc0 = dc0:clone()
+  local dw = hidden.gradWeight:clone()
+  local db = hidden.gradBias:clone()
 
   local function fx(x)   return hidden:forward{x, h0, c0} end
   local function fh0(h0) return hidden:forward{x, h0, c0} end
@@ -167,12 +166,158 @@ function tests.gradcheck()
   local db_error = gradcheck.relative_error(db_num, db)
 
   tester:assertle(dh0_error, 1e-4)
-  tester:assertle(dc0_error, 1e-5)
-  tester:assertle(dx_error, 1e-5)
+  tester:assertle(dc0_error, 1e-4)
+  tester:assertle(dx_error, 1e-4)
   tester:assertle(dw_error, 1e-4)
-  tester:assertle(db_error, 1e-5)
+  tester:assertle(db_error, 1e-4)
 end
 
+
+-- Make sure that everything works correctly when we don't pass an initial cell
+-- state; in this case we do pass an initial hidden state and an input sequence
+function tests.noCellTest()
+
+  local inputShape = {3,4}
+  local tensShape = {2,3}
+  local nodeSize = 3
+  local batchSize = 2
+
+  local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
+
+  local N, H = batchSize, nodeSize
+
+  local sz_x = {N}
+  for _, v in ipairs(hidden.inputShape) do
+    table.insert(sz_x, v)
+  end
+  table.insert(sz_x, 2 * H)
+
+  local sz_h = {N}
+  for i, v in ipairs(hidden.hiddenShape) do
+    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
+      table.insert(sz_h, v)
+    end
+  end
+  table.insert(sz_h, H)
+
+  for t = 1, 3 do
+    local x  = torch.randn(torch.LongStorage(sz_x))
+    local h0 = torch.randn(torch.LongStorage(sz_h))
+    local dout = torch.randn(torch.LongStorage(sz_x))
+
+    local out = hidden:forward{x, h0}
+    local din = hidden:backward({x, h0}, dout)
+
+    tester:assert(torch.type(din) == 'table')
+    tester:assert(#din == 2)
+    check_size(din[1], sz_x)
+    check_size(din[2], sz_h)
+
+    -- Make sure the initial cell state got reset to zero
+    tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+  end
+end
+
+
+-- Make sure that everything works when we don't pass initial hidden or initial
+-- cell state; in this case we only pass input sequence of vectors
+function tests.noHiddenTest()
+
+  local inputShape = {3,4}
+  local tensShape = {2,3}
+  local nodeSize = 3
+  local batchSize = 2
+
+  local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
+
+  local N, H = batchSize, nodeSize
+
+  local sz_x = {N}
+  for _, v in ipairs(hidden.inputShape) do
+    table.insert(sz_x, v)
+  end
+  table.insert(sz_x, 2 * H)
+
+  local sz_h = {N}
+  for i, v in ipairs(hidden.hiddenShape) do
+    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
+      table.insert(sz_h, v)
+    end
+  end
+  table.insert(sz_h, H)
+
+  for t = 1, 3 do
+    local x  = torch.randn(torch.LongStorage(sz_x))
+    local dout = torch.randn(torch.LongStorage(sz_x))
+
+    local out = hidden:forward(x)
+    local din = hidden:backward(x, dout)
+
+    tester:assert(torch.isTensor(din))
+    check_size(din, sz_x)
+
+    -- Make sure the initial cell state and initial hidden state are zero
+    tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+    tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+  end
+end
+
+
+function tests.rememberStatesTest()
+
+  local inputShape = {3,4}
+  local tensShape = {2,3}
+  local nodeSize = 3
+  local batchSize = 2
+
+  local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
+  hidden.remember_states = true
+
+  local N, H = batchSize, nodeSize
+
+  local sz_x = {N}
+  for _, v in ipairs(hidden.inputShape) do
+    table.insert(sz_x, v)
+  end
+  table.insert(sz_x, 2 * H)
+
+  local sz_h = {N}
+  for i, v in ipairs(hidden.hiddenShape) do
+    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
+      table.insert(sz_h, v)
+    end
+  end
+  table.insert(sz_h, H)
+
+  local final_h, final_c = nil, nil
+  for t = 1, 4 do
+    local x = torch.randn(torch.LongStorage(sz_x))
+    local dout = torch.randn(torch.LongStorage(sz_x))
+    local out = hidden:forward(x)
+    local din = hidden:backward(x, dout)
+
+    if t == 1 then
+      tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+      tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+    elseif t > 1 then
+      tester:assertTensorEq(hidden.c0, final_c, 0)
+      tester:assertTensorEq(hidden.h0, final_h, 0)
+    end
+    final_c = hidden.c:select(1 + hidden.inputDim, hidden.inputShape[hidden.inputDim])
+    final_c = final_c:select(final_c:dim() - 1, hidden.decompNum):clone()
+    final_h = hidden.h:select(1 + hidden.inputDim, hidden.inputShape[hidden.inputDim])
+    final_h = final_h:select(final_h:dim() - 1, hidden.decompNum):clone()
+  end
+
+  -- Initial states should reset to zero after we call resetStates
+  hidden:resetStates()
+  local x = torch.randn(torch.LongStorage(sz_x))
+  local dout = torch.randn(torch.LongStorage(sz_x))
+  hidden:forward(x)
+  hidden:backward(x, dout)
+  tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+  tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+end
 
 
 tester:add(tests)
