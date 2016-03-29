@@ -16,6 +16,27 @@ local function check_size(x, dims)
   end
 end
 
+local function GetInputAndInitStateSizes(hidden)
+
+  local N, H = hidden.batchSize, hidden.nodeSize
+
+  local sz_x = {N}
+  for _, v in ipairs(hidden.inputShape) do
+    table.insert(sz_x, v)
+  end
+  table.insert(sz_x, 2 * H)
+
+  local sz_h = {N}
+  for i, v in ipairs(hidden.hiddenShape) do
+    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
+      table.insert(sz_h, v)
+    end
+  end
+  table.insert(sz_h, H)
+
+  return sz_x, sz_h
+end
+
 
 function tests.testForward()
 
@@ -26,21 +47,8 @@ function tests.testForward()
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
 
-  local N, H = batchSize, nodeSize
-  local sz_x = {N}
-  for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz_x, v)
-  end
-  table.insert(sz_x, 2 * H)
+  local sz_x, sz_h = GetInputAndInitStateSizes(hidden)
   local x  = torch.randn(torch.LongStorage(sz_x))
-
-  local sz_h = {N}
-  for i, v in ipairs(hidden.hiddenShape) do
-    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz_h, v)
-    end
-  end
-  table.insert(sz_h, H)
   local h0 = torch.randn(torch.LongStorage(sz_h))
   local c0 = torch.randn(torch.LongStorage(sz_h))
 
@@ -49,7 +57,7 @@ function tests.testForward()
 
   -- Do a naive forward pass
   local h, c = hidden.h, hidden.c
-  
+  local N, H = batchSize, nodeSize
   local w1i  = hidden.weight[{{1, H}, {1, H}}]
   local w1f1 = hidden.weight[{{1, H}, {H + 1, 2 * H}}]
   local w1f2 = hidden.weight[{{1, H}, {2 * H + 1, 3 * H}}]
@@ -103,22 +111,9 @@ function tests.gradcheck()
   local batchSize = 2
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
-
-  local N, H = batchSize, nodeSize
-  local sz_x = {N}
-  for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz_x, v)
-  end
-  table.insert(sz_x, 2 * H)
+  
+  local sz_x, sz_h = GetInputAndInitStateSizes(hidden)
   local x  = torch.randn(torch.LongStorage(sz_x))
-
-  local sz_h = {N}
-  for i, v in ipairs(hidden.hiddenShape) do
-    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz_h, v)
-    end
-  end
-  table.insert(sz_h, H)
   local h0 = torch.randn(torch.LongStorage(sz_h))
   local c0 = torch.randn(torch.LongStorage(sz_h))
 
@@ -183,22 +178,7 @@ function tests.noCellTest()
   local batchSize = 2
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
-
-  local N, H = batchSize, nodeSize
-
-  local sz_x = {N}
-  for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz_x, v)
-  end
-  table.insert(sz_x, 2 * H)
-
-  local sz_h = {N}
-  for i, v in ipairs(hidden.hiddenShape) do
-    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz_h, v)
-    end
-  end
-  table.insert(sz_h, H)
+  local sz_x, sz_h = GetInputAndInitStateSizes(hidden)
 
   for t = 1, 3 do
     local x  = torch.randn(torch.LongStorage(sz_x))
@@ -229,22 +209,7 @@ function tests.noHiddenTest()
   local batchSize = 2
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
-
-  local N, H = batchSize, nodeSize
-
-  local sz_x = {N}
-  for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz_x, v)
-  end
-  table.insert(sz_x, 2 * H)
-
-  local sz_h = {N}
-  for i, v in ipairs(hidden.hiddenShape) do
-    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz_h, v)
-    end
-  end
-  table.insert(sz_h, H)
+  local sz_x, sz_h = GetInputAndInitStateSizes(hidden)
 
   for t = 1, 3 do
     local x  = torch.randn(torch.LongStorage(sz_x))
@@ -272,22 +237,7 @@ function tests.rememberStatesTest()
 
   local hidden = nn.TensHidden(inputShape, tensShape, nodeSize, batchSize)
   hidden.remember_states = true
-
-  local N, H = batchSize, nodeSize
-
-  local sz_x = {N}
-  for _, v in ipairs(hidden.inputShape) do
-    table.insert(sz_x, v)
-  end
-  table.insert(sz_x, 2 * H)
-
-  local sz_h = {N}
-  for i, v in ipairs(hidden.hiddenShape) do
-    if i ~= hidden.inputDim and i ~= hidden.hiddenDim then
-      table.insert(sz_h, v)
-    end
-  end
-  table.insert(sz_h, H)
+  local sz_x, sz_h = GetInputAndInitStateSizes(hidden)
 
   local final_h, final_c = nil, nil
   for t = 1, 4 do
