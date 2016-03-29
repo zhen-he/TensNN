@@ -5,7 +5,7 @@ require 'TensHidden'
 local gradcheck = require 'util.gradcheck'
 
 
-local tests = {}
+local tests = torch.TestSuite()
 local tester = torch.Tester()
 
 
@@ -15,6 +15,7 @@ local function check_size(x, dims)
     tester:assert(x:size(i) == d)
   end
 end
+
 
 local function GetInputAndInitStateSizes(hidden)
 
