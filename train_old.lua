@@ -2,7 +2,7 @@ require 'torch'
 require 'nn'
 require 'optim'
 
-require 'TensLM'
+require 'LanguageModel'
 require 'util.DataLoader'
 
 local utils = require 'util.utils'
@@ -18,8 +18,10 @@ cmd:option('-seq_length', 50)
 
 -- Model options
 cmd:option('-init_from', '')
+cmd:option('-model_type', 'lstm')
+cmd:option('-wordvec_size', 64)
 cmd:option('-rnn_size', 128)
-cmd:option('-tensShape', {2,2})
+cmd:option('-num_layers', 2)
 cmd:option('-dropout', 0)
 cmd:option('-batchnorm', 0)
 
@@ -40,7 +42,7 @@ cmd:option('-speed_benchmark', 0) -- record the time consuming
 cmd:option('-memory_benchmark', 0) -- record the memory usage
 
 -- Backend options
-cmd:option('-gpu', -1)
+cmd:option('-gpu', 0)
 cmd:option('-gpu_backend', 'cuda')
 
 local opt = cmd:parse(arg)
@@ -85,7 +87,7 @@ if opt.init_from ~= '' then
   print('Initializing from ', opt.init_from)
   model = torch.load(opt.init_from).model:type(dtype)
 else
-  model = nn.TensLM(opt_clone):type(dtype)
+  model = nn.LanguageModel(opt_clone):type(dtype)
 end
 local params, grad_params = model:getParameters() -- parameters
 local crit = nn.CrossEntropyCriterion():type(dtype) -- criterion (the output is score so we use this one)

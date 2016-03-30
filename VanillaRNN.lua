@@ -182,6 +182,7 @@ function layer:backward(input, gradOutput, scale)
     self.gradInput = {self.grad_h0, self.grad_x}
   else
     self.gradInput = self.grad_x -- the usual case
+  end
 
   return self.gradInput
 end

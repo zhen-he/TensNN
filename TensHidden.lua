@@ -5,47 +5,25 @@ require 'nn'
 local hidden, parent = torch.class('nn.TensHidden', 'nn.Module')
 
 
-function hidden:__init(inputShape, tensShape, nodeSize, batchSize)
+function hidden:__init(tensShape, nodeSize)
 
-  assert(#inputShape > 0, 'invalid input shape')
   assert(#tensShape > 0, 'invalid tensorizing shape')
   assert(nodeSize > 0, 'invalid node size')
-  assert(batchSize > 0, 'invalid batch size')
 
   parent.__init(self)
   
-  self.inputShape = inputShape -- table
+  self.inputShape = nil
   self.tensShape = tensShape -- table
   self.nodeSize = nodeSize
-  self.batchSize = batchSize
+  self.batchSize = nil
 
-  self.inputDim = #self.inputShape
-  self.tensDim = #self.tensShape
-  self.decompNum = self.inputDim + self.tensDim - 1
-
-  self.hiddenShape = {} -- table
-  for _, v in ipairs(self.inputShape) do
-    table.insert(self.hiddenShape, v)
-  end
-  for _, v in ipairs(self.tensShape) do
-    table.insert(self.hiddenShape, v)
-  end
-  table.insert(self.hiddenShape, self.decompNum)
-  self.hiddenDim = #self.hiddenShape
-  self.totalDim = self.hiddenDim + 2 -- one for batch and one for node vector
-
-  self.nodeNum = 1
-  for _, v in ipairs(self.hiddenShape) do
-      self.nodeNum = self.nodeNum * v
-  end
-  
   local H = self.nodeSize
   self.weight = torch.Tensor(2 * H, 5 * H) -- input gate, forget gate1, forget gate2, output gate, new content
   self.gradWeight = torch.Tensor(2 * H, 5 * H):zero()
   self.bias = torch.Tensor(5 * H)
   self.gradBias = torch.Tensor(5 * H):zero()
   self:reset()
-  
+
   self.stateAndGradBuff = torch.Tensor()
   self.gates = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), 5H)
   self.grad_b_sum = torch.Tensor() -- This will be (1, 5H)
@@ -79,11 +57,53 @@ function hidden:resetStates()
 end
 
 
-function hidden:InitState()
+function hidden:InitState(input)
+
+  local isInputShapeChanged = false
+  if self.inputShape then
+    if self.inputDim + 2 ~= input:dim() then
+      isInputShapeChanged = true
+    else
+      for i, v in ipairs(self.inputShape) do
+        if input:size(i + 1) ~= v then
+          isInputShapeChanged = true
+          break
+        end
+      end
+    end
+  end
+  if not self.inputShape or isInputShapeChanged then
+    self.batchSize = input:size(1)
+
+    self.inputShape = {}
+    for i = 2, input:dim() - 1 do
+      table.insert(self.inputShape, input:size(i))
+    end
+
+    self.inputDim = #self.inputShape
+    self.tensDim = #self.tensShape
+    self.decompNum = self.inputDim + self.tensDim - 1
+
+    self.hiddenShape = {} -- table
+    for _, v in ipairs(self.inputShape) do
+      table.insert(self.hiddenShape, v)
+    end
+    for _, v in ipairs(self.tensShape) do
+      table.insert(self.hiddenShape, v)
+    end
+    table.insert(self.hiddenShape, self.decompNum)
+    self.hiddenDim = #self.hiddenShape
+    self.totalDim = self.hiddenDim + 2 -- one for batch and one for node vector
+
+    self.nodeNum = 1
+    for _, v in ipairs(self.hiddenShape) do
+        self.nodeNum = self.nodeNum * v
+    end
+  end
 
   local H, N = self.nodeSize, self.batchSize
 
-  if self.stateAndGradBuff:nElement() == 0 then
+  if self.stateAndGradBuff:nElement() == 0 or isInputShapeChanged then
     local sz = {N}
     for _, v in ipairs(self.hiddenShape) do
       table.insert(sz, v + 1)
@@ -125,8 +145,8 @@ function hidden:InitState()
     end
     local states = self.stateAndGradBuff[stateRegion]
     local grads = self.stateAndGradBuff[gradRegion]
-    self.output = self.stateAndGradBuff[outputRegion]
-    self.grad_x = self.stateAndGradBuff[gradInputRegion]
+    self._output = self.stateAndGradBuff[outputRegion]
+    self._grad_x = self.stateAndGradBuff[gradInputRegion]
     self.gradOutput = self.stateAndGradBuff[gradOutputRegion]
     local grad_h0c0 = self.stateAndGradBuff[gradInitStateRegion]
 
@@ -135,11 +155,11 @@ function hidden:InitState()
     self.c = states:narrow(S, H + 1, H)
     self.grad_h = grads:narrow(S, 1, H)
     self.grad_c = grads:narrow(S, H + 1, H)
-    self.grad_h0 = grad_h0c0:narrow(grad_h0c0:dim(), 1, H)
-    self.grad_c0 = grad_h0c0:narrow(grad_h0c0:dim(), H + 1, H)
+    self._grad_h0 = grad_h0c0:narrow(grad_h0c0:dim(), 1, H)
+    self._grad_c0 = grad_h0c0:narrow(grad_h0c0:dim(), H + 1, H)
   end
 
-  if self.gates:nElement() == 0 then
+  if self.gates:nElement() == 0 or isInputShapeChanged then
     local sz = {N}
     for _, v in ipairs(self.hiddenShape) do
       table.insert(sz, v)
@@ -156,7 +176,7 @@ function hidden:InitState()
     self.grad_a:resize(N, 5 * H):zero() -- This will be (N, 5H)
   end
 
-  if self.gradIndicator:nElement() == 0 then
+  if self.gradIndicator:nElement() == 0 or isInputShapeChanged then
     sz = {}
     for _, v in ipairs(self.hiddenShape) do
       table.insert(sz, v + 1)
@@ -185,16 +205,20 @@ function hidden:clearState()
   self.grad_b_sum:set()
   self.grad_a:set()
   self.gradIndicator:set()
+
+  self.output:set()
+  self.grad_x:set()
+  self.grad_h0:set()
+  self.grad_c0:set()
 end
 
 
 function hidden:CheckSize(input, gradOutput)
 
+  assert(torch.isTensor(input))
   assert(input:dim() >= 3) -- batch, input dim, node vector
-  assert(input:dim() == self.inputDim + 2)
-  assert(input:size(1) == self.batchSize)
-  for i, v in ipairs(self.inputShape) do
-    assert(input:size(i + 1) == v)
+  if self.batchSize then
+    assert(input:size(1) == self.batchSize)
   end
   assert(input:size(input:dim()) == self.nodeSize * 2) -- hidden vector and cell vector
 
@@ -336,7 +360,7 @@ function hidden:updateOutput(input)
   self:CheckSize(x)
   self.isReturnGradH0 = (h0 ~= nil)
   self.isReturnGradC0 = (c0 ~= nil)
-  self:InitState()
+  self:InitState(x)
   local h, c = self.h, self.c
 
   if h0 then
@@ -346,7 +370,7 @@ function hidden:updateOutput(input)
     local h0_ = h:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
     h0_ = h0_:select(h0_:dim() - 1, self.decompNum) -- the last slice on the decompesing dimension
     if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-      h0:resizeAs(h0_):zero()
+      h0:resizeAs(h0_):zero():type(self.weight:type())
     else -- if remember, use the previous evaluated h as h0
       h0:copy(h0_)
     end
@@ -359,7 +383,7 @@ function hidden:updateOutput(input)
     local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
     c0_ = c0_:select(c0_:dim() - 1, self.decompNum) -- the last slice on the decompesed dimension
     if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-      c0:resizeAs(c0_):zero()
+      c0:resizeAs(c0_):zero():type(self.weight:type())
     else -- if remember, use the previous evaluated c as c0
       c0:copy(c0_)
     end
@@ -382,7 +406,7 @@ function hidden:updateOutput(input)
     -- get the predecessor states
     local h1, c1 = self:GetPredecessorState(x, coor, self.hiddenDim)
     local h2, c2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
-
+print(h2)
     -- update the current node
     local hn = h[{{}, unpack(coor)}]
     local cn = c[{{}, unpack(coor)}]
@@ -402,6 +426,7 @@ function hidden:updateOutput(input)
     self:MoveCoor(coor, 1)
   end
 
+  self.output = self._output:contiguous()
   return self.output
 end
 
@@ -417,7 +442,6 @@ function hidden:backward(input, gradOutput, scale)
   local grad_h, grad_c = self.grad_h, self.grad_c
   if not c0 then c0 = self.c0 end
   if not h0 then h0 = self.h0 end
-  local grad_h0, grad_c0 = self.grad_h0, self.grad_c0
 
   local H, N = self.nodeSize, self.batchSize
   local w1 = self.weight[{{1, H}}]
@@ -514,6 +538,9 @@ function hidden:backward(input, gradOutput, scale)
     self:MoveCoor(coor, -1)
   end
 
+  self.grad_x = self._grad_x:contiguous()
+  self.grad_h0 = self._grad_h0:contiguous()
+  self.grad_c0 = self._grad_c0:contiguous()
   if self.isReturnGradH0 and self.isReturnGradC0 then
     self.gradInput = {self.grad_x, self.grad_h0, self.grad_c0}
   elseif self.isReturnGradH0 then
