@@ -370,7 +370,7 @@ function hidden:updateOutput(input)
     local h0_ = h:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
     h0_ = h0_:select(h0_:dim() - 1, self.decompNum) -- the last slice on the decompesing dimension
     if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-      h0:resizeAs(h0_):zero():type(self.weight:type())
+      h0:resizeAs(h0_):zero()
     else -- if remember, use the previous evaluated h as h0
       h0:copy(h0_)
     end
@@ -383,7 +383,7 @@ function hidden:updateOutput(input)
     local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
     c0_ = c0_:select(c0_:dim() - 1, self.decompNum) -- the last slice on the decompesed dimension
     if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-      c0:resizeAs(c0_):zero():type(self.weight:type())
+      c0:resizeAs(c0_):zero()
     else -- if remember, use the previous evaluated c as c0
       c0:copy(c0_)
     end
@@ -406,7 +406,7 @@ function hidden:updateOutput(input)
     -- get the predecessor states
     local h1, c1 = self:GetPredecessorState(x, coor, self.hiddenDim)
     local h2, c2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
-print(h2)
+
     -- update the current node
     local hn = h[{{}, unpack(coor)}]
     local cn = c[{{}, unpack(coor)}]
@@ -561,3 +561,4 @@ end
 function hidden:accGradParameters(input, gradOutput, scale)
   self:backward(input, gradOutput, scale)
 end
+
