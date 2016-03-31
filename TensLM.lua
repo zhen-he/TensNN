@@ -24,9 +24,10 @@ function LM:__init(kwargs)
   local V, H = self.vocab_size, self.rnn_size
 
   self.net = nn.Sequential()
-  self.tensHidden = nn.TensHidden(self.tensShape, H)
-
   self.net:add(nn.LookupTable(V, 2 * H)) -- embedding
+
+  self.tensHidden = nn.TensHidden(self.tensShape, H)
+  self.tensHidden.remember_states = true
   self.net:add(self.tensHidden)
 
   self.view1 = nn.View(1, 1, -1):setNumInputDims(3)
@@ -38,7 +39,7 @@ function LM:__init(kwargs)
 end
 
 
-function LM:updateOutput(input)--  self.net:add(nn.Linear(V, 2 * H))
+function LM:updateOutput(input)
   local N, T = input:size(1), input:size(2)
   self.view1:resetSize(N * T, -1)
   self.view2:resetSize(N, T, -1)

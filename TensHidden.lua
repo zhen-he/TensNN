@@ -72,6 +72,12 @@ function hidden:InitState(input)
       end
     end
   end
+  if self.batchSize then
+    if input:size(1) ~= self.batchSize then
+      isInputShapeChanged = true
+    end
+  end
+
   if not self.inputShape or isInputShapeChanged then
     self.batchSize = input:size(1)
 
@@ -217,9 +223,6 @@ function hidden:CheckSize(input, gradOutput)
 
   assert(torch.isTensor(input))
   assert(input:dim() >= 3) -- batch, input dim, node vector
-  if self.batchSize then
-    assert(input:size(1) == self.batchSize)
-  end
   assert(input:size(input:dim()) == self.nodeSize * 2) -- hidden vector and cell vector
 
   if gradOutput then
@@ -267,7 +270,8 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   local H, N = self.nodeSize, self.batchSize
   local h, c = self.h, self.c
   local h0, c0 = self.h0, self.c0
-  local hp, cp = torch.Tensor(), torch.Tensor()
+  local hp = torch.Tensor():type(self.weight:type())
+  local cp = torch.Tensor():type(self.weight:type())
 
   local preCoor = {}
   for i, v in ipairs(curCoor) do
@@ -372,6 +376,7 @@ function hidden:updateOutput(input)
     if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
       h0:resizeAs(h0_):zero()
     else -- if remember, use the previous evaluated h as h0
+      assert(x:size(1) == self.batchSize, 'batch sizes must be the same to remember states')
       h0:copy(h0_)
     end
   end
@@ -385,6 +390,7 @@ function hidden:updateOutput(input)
     if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
       c0:resizeAs(c0_):zero()
     else -- if remember, use the previous evaluated c as c0
+      assert(x:size(1) == self.batchSize, 'batch sizes must be the same to remember states')
       c0:copy(c0_)
     end
   end
@@ -561,4 +567,3 @@ end
 function hidden:accGradParameters(input, gradOutput, scale)
   self:backward(input, gradOutput, scale)
 end
-

@@ -1,11 +1,11 @@
 require 'torch'
 require 'nn'
 
-require 'LanguageModel'
+require 'TensLM'
 
 
 local cmd = torch.CmdLine()
-cmd:option('-checkpoint', 'cv/checkpoint_4000.t7')
+cmd:option('-checkpoint', 'cv/checkpoint_17800.t7')
 cmd:option('-length', 2000)
 cmd:option('-start_text', '')
 cmd:option('-sample', 1)

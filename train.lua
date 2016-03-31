@@ -19,7 +19,7 @@ cmd:option('-seq_length', 50)
 -- Model options
 cmd:option('-init_from', '')
 cmd:option('-rnn_size', 128)
-cmd:option('-tensShape', {2,2})
+cmd:option('-tensShape', {1})
 cmd:option('-dropout', 0)
 cmd:option('-batchnorm', 0)
 
@@ -40,7 +40,7 @@ cmd:option('-speed_benchmark', 0) -- record the time consuming
 cmd:option('-memory_benchmark', 0) -- record the memory usage
 
 -- Backend options
-cmd:option('-gpu', -1)
+cmd:option('-gpu', 0)
 cmd:option('-gpu_backend', 'cuda')
 
 local opt = cmd:parse(arg)
