@@ -12,8 +12,10 @@ function gradcheck.relative_error(x, y, h)
   end
 end
 
--- calculate the numeric gradients for all the elements in x, given df (the gradients at output)
+
 function gradcheck.numeric_gradient(f, x, df, eps)
+  -- calculate the numeric gradients for all the elements in x, given df (the gradients at output)
+
   df = df or 1.0
   eps = eps or 1e-8
   local n = x:nElement()
@@ -26,13 +28,13 @@ function gradcheck.numeric_gradient(f, x, df, eps)
     x_flat[i] = orig + eps
     local pos = f(x)
     if torch.isTensor(df) then
-      pos = pos:clone()
+      pos = pos:clone() -- use a new address to avoid affecting related variables
     end
     
     x_flat[i] = orig - eps
     local neg = f(x)
     if torch.isTensor(df) then
-      neg = neg:clone()
+      neg = neg:clone() -- use a new address to avoid affecting related variables
     end
     
     local d = nil
@@ -55,8 +57,9 @@ Inputs:
 - x is the point at which to evalute f
 - dx is the analytic gradient of f at x
 --]]
--- check the gradients for a random set of elements in x, given the analytic gradients dx
 function gradcheck.check_random_dims(f, x, dx, eps, num_iterations, verbose)
+  -- check the gradients for a random set of elements in x, given the analytic gradients dx
+  
   if verbose == nil then verbose = false end
   eps = eps or 1e-4
 
