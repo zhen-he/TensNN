@@ -7,13 +7,20 @@ import codecs
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--input_txt', default='data/tiny-shakespeare.txt')
-parser.add_argument('--output_h5', default='data/tiny-shakespeare.h5')
-parser.add_argument('--output_json', default='data/tiny-shakespeare.json')
-parser.add_argument('--val_frac', type=float, default=0.1)
-parser.add_argument('--test_frac', type=float, default=0.1)
+parser.add_argument('--input_txt', default='data/enwik8')
+parser.add_argument('--output_h5', default='data/enwik8.h5')
+parser.add_argument('--output_json', default='data/enwik8.json')
+parser.add_argument('--val_frac', type=float, default=0.05)
+parser.add_argument('--test_frac', type=float, default=0.05)
 parser.add_argument('--quiet', action='store_true')
-parser.add_argument('--encoding', default='utf-8')
+parser.add_argument('--encoding', default='bytes')
+# parser.add_argument('--input_txt', default='data/tiny-shakespeare.txt')
+# parser.add_argument('--output_h5', default='data/tiny-shakespeare.h5')
+# parser.add_argument('--output_json', default='data/tiny-shakespeare.json')
+# parser.add_argument('--val_frac', type=float, default=0.1)
+# parser.add_argument('--test_frac', type=float, default=0.1)
+# parser.add_argument('--quiet', action='store_true')
+# parser.add_argument('--encoding', default='utf-8')
 args = parser.parse_args()
 
 
