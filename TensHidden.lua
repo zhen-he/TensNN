@@ -359,7 +359,7 @@ end
 
 
 function hidden:updateOutput(input)
-
+  self.recompute_backward = true
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x)
   self.isReturnGradH0 = (h0 ~= nil)
@@ -439,10 +439,12 @@ end
 
 function hidden:backward(input, gradOutput, scale)
 
+  self.recompute_backward = false
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x, gradOutput)
   self.gradOutput:copy(gradOutput)
   scale = scale or 1.0
+  assert(scale == 1.0, 'must have scale=1')
 
   local h, c = self.h, self.c
   local grad_h, grad_c = self.grad_h, self.grad_c
@@ -560,10 +562,15 @@ end
 
 
 function hidden:updateGradInput(input, gradOutput)
-  return self:backward(input, gradOutput, 0)
+  if self.recompute_backward then
+    self:backward(input, gradOutput, 1.0)
+  end
+  return self.gradInput
 end
 
 
 function hidden:accGradParameters(input, gradOutput, scale)
-  self:backward(input, gradOutput, scale)
+  if self.recompute_backward then
+    self:backward(input, gradOutput, scale)
+  end
 end

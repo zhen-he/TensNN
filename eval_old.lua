@@ -1,7 +1,7 @@
 require 'torch'
 require 'nn'
 
-require 'TensLM'
+require 'LanguageModel'
 require 'util.DataLoader'
 
 local utils = require 'util.utils'
@@ -9,7 +9,7 @@ local utils = require 'util.utils'
 
 local cmd = torch.CmdLine()
 
-cmd:option('-checkpoint', 'cv4/checkpoint_13000.t7')
+cmd:option('-checkpoint', 'cv_3/checkpoint_17800.t7')
 cmd:option('-split', 'train')
 cmd:option('-gpu', 0)
 cmd:option('-gpu_backend', 'cuda')
