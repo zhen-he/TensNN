@@ -11,29 +11,29 @@ local unpack = unpack or table.unpack
 local cmd = torch.CmdLine()
 
 -- Dataset options
-cmd:option('-input_h5', 'data/enwik8.h5')
-cmd:option('-input_json', 'data/enwik8.json')
---cmd:option('-input_h5', 'data/tiny-shakespeare.h5')
---cmd:option('-input_json', 'data/tiny-shakespeare.json')
-cmd:option('-batch_size', 100)
-cmd:option('-seq_length', 100)
+--cmd:option('-input_h5', 'data/enwik8.h5')
+--cmd:option('-input_json', 'data/enwik8.json')
+cmd:option('-input_h5', 'data/tiny-shakespeare.h5')
+cmd:option('-input_json', 'data/tiny-shakespeare.json')
+cmd:option('-batch_size', 50)
+cmd:option('-seq_length', 50)
 
 -- Model options
 cmd:option('-init_from', '')
-cmd:option('-rnn_size', 200)
+cmd:option('-rnn_size', 128)
 cmd:option('-tensShape', {1})
 cmd:option('-dropout', 0)
 cmd:option('-batchnorm', 0)
 
 -- Optimization options
-cmd:option('-max_epochs', 100)
-cmd:option('-learning_rate', 1e-3)
-cmd:option('-grad_clip', 2)
+cmd:option('-max_epochs', 50)
+cmd:option('-learning_rate', 2e-3)
+cmd:option('-grad_clip', 5)
 cmd:option('-lr_decay_every', 5)
 cmd:option('-lr_decay_factor', 0.5)
 
 -- Output options
-cmd:option('-print_every', 1)
+cmd:option('-print_every', 10)
 cmd:option('-checkpoint_every', 1000)
 cmd:option('-checkpoint_name', 'cv/checkpoint')
 

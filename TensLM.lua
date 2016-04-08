@@ -20,6 +20,7 @@ function LM:__init(kwargs)
 
   self.rnn_size = utils.get_kwarg(kwargs, 'rnn_size')
   self.tensShape = utils.get_kwarg(kwargs, 'tensShape')
+  self.batchnorm = utils.get_kwarg(kwargs, 'batchnorm')
 
   local V, H = self.vocab_size, self.rnn_size
 

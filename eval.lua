@@ -9,8 +9,8 @@ local utils = require 'util.utils'
 
 local cmd = torch.CmdLine()
 
-cmd:option('-checkpoint', 'cv4/checkpoint_13000.t7')
-cmd:option('-split', 'train')
+cmd:option('-checkpoint', 'cv/checkpoint_4450.t7')
+cmd:option('-split', 'test')
 cmd:option('-gpu', 0)
 cmd:option('-gpu_backend', 'cuda')
 local opt = cmd:parse(arg)
