@@ -30,6 +30,7 @@ function tests.simpleTest()
     idx_to_token = idx_to_token,
     rnn_size = H,
     tensShape = tensShape,
+    batchnorm = false
   }
   local crit = nn.CrossEntropyCriterion()
   local params, grad_params = LM:getParameters()
@@ -56,6 +57,7 @@ function tests.sampleTest()
     idx_to_token = idx_to_token,
     rnn_size = H,
     tensShape = tensShape,
+    batchnorm = false
   }
   
   local TT = 100
@@ -79,6 +81,7 @@ function tests.encodeDecodeTest()
     idx_to_token=idx_to_token,
     rnn_size = H,
     tensShape = tensShape,
+    batchnorm = false
   }
 
   local s = 'a bad feed'
