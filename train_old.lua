@@ -21,7 +21,7 @@ cmd:option('-init_from', '')
 cmd:option('-model_type', 'lstm')
 cmd:option('-wordvec_size', 64)
 cmd:option('-rnn_size', 128)
-cmd:option('-num_layers', 2)
+cmd:option('-num_layers', 1)
 cmd:option('-dropout', 0)
 cmd:option('-batchnorm', 0)
 
