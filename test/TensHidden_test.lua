@@ -4,7 +4,7 @@ require 'nn'
 require 'TensHidden'
 local gradcheck = require 'util.gradcheck'
 
-
+isBN = 1
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -49,7 +49,7 @@ function tests.testForward()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(tensShape, nodeSize)
+  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
 
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
   local x  = torch.randn(torch.LongStorage(sz_x))
@@ -103,7 +103,7 @@ function tests.gradcheck()
   local nodeSize = 4
   local batchSize = 3
 
-  local hidden = nn.TensHidden(tensShape, nodeSize)
+  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
 
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
   local x  = torch.randn(torch.LongStorage(sz_x))
@@ -164,7 +164,7 @@ function tests.noHiddenTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(tensShape, nodeSize)
+  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
   for t = 1, 3 do
@@ -190,7 +190,7 @@ function tests.rememberStatesTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(tensShape, nodeSize)
+  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
   hidden.remember_states = true
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
