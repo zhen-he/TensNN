@@ -16,7 +16,7 @@ function hidden:__init(tensShape, nodeSize, isBatchNorm)
   self.tensShape = tensShape -- table
   self.nodeSize = nodeSize
   self.batchSize = nil
-  self.isBatchNorm = (isBatchNorm or 1) == 1
+  self.isBatchNorm = (isBatchNorm or 0) == 1
 
   local H = self.nodeSize
   self.weight = torch.Tensor(2 * H, 3 * H) -- forget gate, select gate, new content
@@ -25,14 +25,24 @@ function hidden:__init(tensShape, nodeSize, isBatchNorm)
   self.gradBias = torch.Tensor(3 * H):zero()
   self:reset()
 
+  self.buff = torch.Tensor() -- This will be (N, H), a small buffer
   self.stateAndGradBuff = torch.Tensor()
+
   self.gates = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), 3H)
   self.grad_b_sum = torch.Tensor() -- This will be (1, 3H)
   self.grad_a = torch.Tensor() -- This will be (N, 3H)
-  self.gradIndicator = torch.ByteTensor()
+  self.gradIndicator = torch.ByteTensor() -- for gradients accumulation
+
+  self.norms = torch.Tensor()
+  self.means = torch.Tensor() -- This will be (unpack(self.hiddenShape), H)
+  self.vars = torch.Tensor() -- This will be (unpack(self.hiddenShape), H)
+  self.normIndicator = torch.ByteTensor() -- for batch normalization
+  self.gam = 0.1
+  self.ep = 0.00001
 
   self.h0 = torch.Tensor()
   self.remember_states = false
+  
 end
 
 
@@ -113,6 +123,7 @@ function hidden:InitState(input)
       table.insert(sz, v + 1)
     end
     table.insert(sz, H)
+    self.buff:resize(N, H):zero()
     self.stateAndGradBuff:resize(torch.LongStorage(sz)):zero()
     local stateRegion, gradRegion = {{}}, {{}}
     local outputRegion, gradInputRegion, gradOutputRegion = {{}}, {{}}, {{}}
@@ -156,6 +167,22 @@ function hidden:InitState(input)
     self._grad_h0 = self.stateAndGradBuff[gradInitStateRegion]
   end
 
+  if self.isBatchNorm then
+    if self.norms:nElement() == 0 or isInputShapeChanged then
+      local sz = {}
+      for _, v in ipairs(self.hiddenShape) do
+        table.insert(sz, v + 1)
+      end
+      self.normIndicator:resize(torch.LongStorage(sz)):zero()
+      table.insert(sz, 1, 1)
+      table.insert(sz, H)
+      self.means:resize(torch.LongStorage(sz)):zero()
+      self.vars:resize(torch.LongStorage(sz)):zero()
+      sz[1] = N
+      self.norms:resize(torch.LongStorage(sz)):zero()
+    end
+  end
+
   if self.gates:nElement() == 0 or isInputShapeChanged then
     local sz = {N}
     for _, v in ipairs(self.hiddenShape) do
@@ -191,7 +218,7 @@ function hidden:InitState(input)
     self.gradIndicator[gradOutputRegion]:fill(1)
   end
 
-  -- if self.isBatchNorm and self.bias:size(1) == 5 * H then
+  -- if self.isBatchNorm and self.bias:size(1) == 3 * H then
   --     local bias_ = self.bias:clone()
   --     local bNum = (5 + self.inputDim + self.tensDim + 2) * H
   --     self.bias:resize(bNum)
@@ -207,6 +234,7 @@ function hidden:clearState()
   -- clear intermediate variables (the original clearState() in 'nn.Module' is overloaded, 
   -- as it only clears 'output' and 'gradInput')
 
+  self.buff:set()
   self.stateAndGradBuff:set()
   self.gates:set()
   self.grad_b_sum:set()
@@ -216,6 +244,11 @@ function hidden:clearState()
   self.output:set()
   self.grad_x:set()
   self.grad_h0:set()
+
+  self.norms:set()
+  self.means:set()
+  self.vars:set()
+  self.normIndicator:set()
 end
 
 
@@ -269,6 +302,10 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   local h = self.h
   local h0 = self.h0
   local hp = torch.Tensor():type(self.weight:type())
+  local norms = self.norms
+  local means = self.means
+  local vars = self.vars
+  local normIndicator = self.normIndicator
 
   local preCoor = {}
   for i, v in ipairs(curCoor) do
@@ -281,6 +318,18 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
     preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
   end
+
+  local preNormCoor = {} -- for the normalization of the predecessor
+  if self.isBatchNorm then
+    for i, v in ipairs(preCoor) do
+      preNormCoor[i] = v + 1
+    end
+    preNormCoor[predecessorDim] = preNormCoor[predecessorDim] - 1
+    local meanp = means[{{}, unpack(preNormCoor)}] -- 1 * H
+    local varp = vars[{{}, unpack(preNormCoor)}] -- 1 * H
+    local normp = norms[{{}, unpack(preNormCoor)}] -- N * H
+  end
+
   if preCoor[predecessorDim] > 1 then
     -- point to the previous node
     preCoor[predecessorDim] = preCoor[predecessorDim] - 1
@@ -310,7 +359,16 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
     end
   end
 
-  return hp
+  if self.isBatchNorm then
+    local isNormed = true
+    if normIndicator[preNormCoor] == 0 then
+      isNormed = false
+      normIndicator[preNormCoor] = 1 
+    end
+    return hp, meanp, varp, normp, isNormed
+  else
+    return hp, nil, nil, nil, nil
+  end
 end
 
 
@@ -349,6 +407,46 @@ function hidden:GetPredecessorGrad(curCoor, predecessorDim, gradIndicator)
 end
 
 
+function hidden:batchNormForward(input, mean, var, output)
+  local N, H = input:size(1), input:size(2)
+  local gam, ep = self.gam, self.ep
+  local buff = self.buff
+
+  mean:mean(input, 1)
+  var:var(input, 1)
+  output:copy(mean:expand(N, H)):mul(-1):add(input)
+  buff:copy(var:expand(N, H)):add(ep):sqrt()
+  output:cdiv(buff):mul(gam)
+
+  return output
+end
+
+
+function hidden:batchNormBackward(input, mean, var, gradOutput)
+  local N, H = input:size(1), input:size(2)
+  local gam, ep = self.gam, self.ep
+  local gradInput = gradOutput
+  local buff = self.buff
+
+  gradInput:mul(gam)
+
+  local input_minus_mean = mean:expand(N, H):clone():mul(-1):add(input)
+  local sqrt_var = var:clone():add(ep):sqrt()
+  local grad_var = sqrt_var:clone():pow(-3):div(-2)
+  grad_var = buff:cmul(gradInput, input_minus_mean):sum(1):cmul(grad_var)
+
+  local grad_mean = buff:copy(input_minus_mean):mul(-2):div(N):sum(1):cmul(grad_var)
+  grad_mean = gradInput:sum(1):mul(-1):cdiv(sqrt_var):add(grad_mean)
+
+  local sqrt_var_expand = sqrt_var:expand(N, H)
+  local grad_mean_expand = grad_mean:expand(N, H)
+  buff:mul(-1):cmul(grad_var):addcmul(gradInput, sqrt_var_expand):add(1/N, grad_mean_expand)
+  gradInput:copy(buff)
+
+  return gradInput
+end
+
+
 function hidden:updateOutput(input)
   self.recompute_backward = true
   local x, h0 = self:UnpackInput(input)
@@ -356,13 +454,14 @@ function hidden:updateOutput(input)
   self.isReturnGradH0 = (h0 ~= nil)
   self:InitState(x)
   local h = self.h
+  local H, N = self.nodeSize, self.batchSize
 
   if h0 then
     self.h0 = h0:clone()
   else
     h0 = self.h0
     local h0_ = h:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
-    h0_ = h0_:select(h0_:dim() - 1, self.decompNum) -- the last slice on the decompesing dimension
+    h0_ = h0_:select(h0_:dim() - 1, self.decompNum) -- the last slice on the decomposing dimension
     if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
       h0:resizeAs(h0_):zero()
     else -- if remember, use the previous evaluated h as h0
@@ -370,11 +469,14 @@ function hidden:updateOutput(input)
       h0:copy(h0_)
     end
   end
-
-  local H, N = self.nodeSize, self.batchSize
+  
   local bias_expand = self.bias:view(1, 3 * H):expand(N, 3 * H) -- copy the bias for a batch
   local w1 = self.weight[{{1, H}}] -- weights for h1
   local w2 = self.weight[{{H + 1, 2 * H}}] -- weights for h2
+
+  if self.isBatchNorm then
+    self.normIndicator:zero()
+  end
 
   -- initialize the coordinate of current node
   local coor = {}
@@ -386,14 +488,26 @@ function hidden:updateOutput(input)
     local decompNodeId = (nodeId - 1) % self.decompNum + 1
 
     -- get the predecessor states
-    local h1 = self:GetPredecessorState(x, coor, self.hiddenDim)
-    local h2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1, mean1, var1, norm1, isNormed1 = self:GetPredecessorState(x, coor, self.hiddenDim)
+    local h2, mean2, var2, norm2, isNormed2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1_, h2_ = h1, h2
+
+   -- batch normaliztion
+    if mean1 then
+      if not isNormed1 then
+        batchNormForward(h1, mean1, var1, norm1)
+      end
+      if not isNormed2 then
+        batchNormForward(h2, mean2, var2, norm2)
+      end
+      h1_, h2_ = norm1, norm2
+    end
 
     -- update the current node
     local hn = h[{{}, unpack(coor)}]
     local curGates = self.gates[{{}, unpack(coor)}] -- N * 3H
-    curGates:addmm(bias_expand, h1, w1) -- w1 * h1 + b
-    curGates:addmm(h2, w2) -- w1 * h1 + b + w2 * h2
+    curGates:addmm(bias_expand, h1_, w1) -- w1 * h1 + b
+    curGates:addmm(h2_, w2) -- w1 * h1 + b + w2 * h2
     curGates:narrow(2, 1, 2 * H):sigmoid() -- for gates
     curGates:narrow(2, 2 * H + 1, H):tanh() -- for new content
     local f  = curGates:narrow(2, 1, H)
@@ -430,6 +544,7 @@ function hidden:backward(input, gradOutput, scale)
   local grad_b = self.gradBias[{{1, 3 * H}}]
   local grad_b_sum = self.grad_b_sum
   local gradIndicator = self.gradIndicator:clone()
+  local buff = self.buff
 
   -- initialize the coordinate of current node
   local coor = {}
@@ -441,8 +556,8 @@ function hidden:backward(input, gradOutput, scale)
     local decompNodeId = (nodeId - 1) % self.decompNum + 1
 
     -- get the predecessor states
-    local h1 = self:GetPredecessorState(x, coor, self.hiddenDim)
-    local h2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1, mean1, var1 = self:GetPredecessorState(x, coor, self.hiddenDim)
+    local h2, mean2, var2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
 
     -- get the predecessor gradients
     local grad_h1, isGrad1 = self:GetPredecessorGrad(coor, self.hiddenDim, gradIndicator)
@@ -465,12 +580,12 @@ function hidden:backward(input, gradOutput, scale)
     local grad_ag = grad_a:narrow(2, 2 * H + 1, H)
 
     local one_minus_f = grad_ag:fill(1):add(-1, f) -- grad_ag is used as a buffer to store (1 - f)
-    local buffer1 = h1:clone():add(-1, h2):cmul(s) -- a buffer to store (h1 - h2) * s
+    buff = h1:clone():add(-1, h2):cmul(s) -- a buffer to store (h1 - h2) * s
 
-    grad_af:copy(buffer1):add(h2):add(-1, g):cmul(f):cmul(one_minus_f):cmul(grad_hn)
-    grad_as:fill(1):add(-1, s):cmul(buffer1):cmul(f):cmul(grad_hn)
-    buffer1:fill(1):addcmul(-1, g, g)
-    grad_ag:cmul(buffer1):cmul(grad_hn)
+    grad_af:copy(buff):add(h2):add(-1, g):cmul(f):cmul(one_minus_f):cmul(grad_hn)
+    grad_as:fill(1):add(-1, s):cmul(buff):cmul(f):cmul(grad_hn)
+    buff:fill(1):addcmul(-1, g, g)
+    grad_ag:cmul(buff):cmul(grad_hn)
 
     -- temporally accumulate the gradients of parameters, as they are shared
     grad_w1:addmm(scale, h1:t(), grad_a)
@@ -479,18 +594,26 @@ function hidden:backward(input, gradOutput, scale)
     grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
     grad_b:add(scale, grad_b_sum)
 
-    buffer1:cmul(f, s):cmul(grad_hn):addmm(grad_a, w1:t())
-    if not isGrad1 then -- if no previous gradient, we overwrite it
-      grad_h1:copy(buffer1)
-    else -- if previous gradient exists, we accumulate it
-      grad_h1:add(buffer1)
+    local grad_h1_ = buff:mm(grad_a, w1:t()):clone()
+    local grad_h2_ = buff:mm(grad_a, w2:t()):clone()
+
+    if mean1 then
+      self:batchNormBackward(h1, mean1, var1, grad_h1_)
+      self:batchNormBackward(h2, mean2, var2, grad_h2_)
     end
 
-    buffer1:fill(1):add(-1, s):cmul(f):cmul(grad_hn):addmm(grad_a, w2:t())
-    if not isGrad2 then -- if no previous gradient, we overwrite it 
-      grad_h2:copy(buffer1)
+    buff:cmul(f, s):cmul(grad_hn):add(grad_h1_)
+    if not isGrad1 then -- if no previous gradient, we overwrite it
+      grad_h1:copy(buff)
     else -- if previous gradient exists, we accumulate it
-      grad_h2:add(buffer1)
+      grad_h1:add(buff)
+    end
+
+    buff:fill(1):add(-1, s):cmul(f):cmul(grad_hn):add(grad_h2_)
+    if not isGrad2 then -- if no previous gradient, we overwrite it 
+      grad_h2:copy(buff)
+    else -- if previous gradient exists, we accumulate it
+      grad_h2:add(buff)
     end
     
     self:MoveCoor(coor, -1)

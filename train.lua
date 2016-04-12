@@ -20,13 +20,13 @@ cmd:option('-seq_length', 50)
 
 -- Model options
 cmd:option('-init_from', '')
-cmd:option('-rnn_size', 128)
-cmd:option('-tensShape', {1})
+cmd:option('-rnn_size', 256)
+cmd:option('-tensShape', {3})
 cmd:option('-dropout', 0)
-cmd:option('-batchnorm', 0)
+cmd:option('-batchnorm', 1)
 
 -- Optimization options
-cmd:option('-max_epochs', 50)
+cmd:option('-max_epochs', 40)
 cmd:option('-learning_rate', 2e-3)
 cmd:option('-grad_clip', 5)
 cmd:option('-lr_decay_every', 5)
