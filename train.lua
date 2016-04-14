@@ -26,7 +26,7 @@ cmd:option('-dropout', 0)
 cmd:option('-batchnorm', 1)
 
 -- Optimization options
-cmd:option('-max_epochs', 40)
+cmd:option('-max_epochs', 30)
 cmd:option('-learning_rate', 2e-3)
 cmd:option('-grad_clip', 5)
 cmd:option('-lr_decay_every', 5)

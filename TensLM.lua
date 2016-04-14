@@ -35,7 +35,7 @@ function LM:__init(kwargs)
   -- if self.batchnorm == 1 then
     self.bn_view_in = nn.View(1, 1, -1):setNumInputDims(3)
     self.net:add(self.bn_view_in)
-    self.net:add(nn.BatchNormalization(H))
+    self.net:add(nn.BatchNormalization(H, nil, nil, false))
     self.bn_view_out = nn.View(1, -1):setNumInputDims(2)
     self.net:add(self.bn_view_out)
   -- end

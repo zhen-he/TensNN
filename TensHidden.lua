@@ -37,7 +37,7 @@ function hidden:__init(tensShape, nodeSize, isBatchNorm)
   self.means = torch.Tensor() -- This will be (unpack(self.hiddenShape), H)
   self.vars = torch.Tensor() -- This will be (unpack(self.hiddenShape), H)
   self.normIndicator = torch.ByteTensor() -- for batch normalization
-  self.gam = 0.1
+  self.gam = 1
   self.ep = 0.00001
 
   self.h0 = torch.Tensor()
@@ -53,7 +53,7 @@ function hidden:reset(std)
   if not std then
     std = 1.0 / math.sqrt(H * 2)
   end
-  self.weight:normal(0, std) -- :add(torch.eye(H):repeatTensor(2, 3))
+  self.weight:normal(0, std) --:add(torch.eye(H):repeatTensor(2, 3))
   self.bias:zero()
   self.bias[{{1, self.nodeSize}}]:fill(1) -- set the bias of forget gates to 1
   return self
