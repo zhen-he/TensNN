@@ -31,14 +31,14 @@ function LM:__init(kwargs)
   self.tensHidden.remember_states = true
   self.net:add(self.tensHidden)
 
-  -- batch normalization layer
-  if self.batchnorm == 1 then
+  -- the last batch normalization layer
+  -- if self.batchnorm == 1 then
     self.bn_view_in = nn.View(1, 1, -1):setNumInputDims(3)
     self.net:add(self.bn_view_in)
     self.net:add(nn.BatchNormalization(H))
     self.bn_view_out = nn.View(1, -1):setNumInputDims(2)
     self.net:add(self.bn_view_out)
-  end
+  -- end
 
   self.view1 = nn.View(1, 1, -1):setNumInputDims(3)
   self.view2 = nn.View(1, -1):setNumInputDims(2)

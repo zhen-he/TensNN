@@ -2,7 +2,7 @@ require 'torch'
 require 'nn'
 require 'optim'
 
-require 'LanguageModel'
+require 'TensLM'
 require 'util.DataLoader'
 
 local utils = require 'util.utils'
@@ -11,24 +11,22 @@ local unpack = unpack or table.unpack
 local cmd = torch.CmdLine()
 
 -- Dataset options
-cmd:option('-input_h5', 'data/tiny-shakespeare.h5')
-cmd:option('-input_json', 'data/tiny-shakespeare.json')
-cmd:option('-batch_size', 50)
-cmd:option('-seq_length', 50)
+cmd:option('-input_h5', 'data/enwik8.h5')
+cmd:option('-input_json', 'data/enwik8.json')
+cmd:option('-batch_size', 100)
+cmd:option('-seq_length', 100)
 
 -- Model options
 cmd:option('-init_from', '')
-cmd:option('-model_type', 'lstm')
-cmd:option('-wordvec_size', 256)
-cmd:option('-rnn_size', 256)
-cmd:option('-num_layers', 3)
+cmd:option('-rnn_size', 1000)
+cmd:option('-tensShape', {1})
 cmd:option('-dropout', 0)
 cmd:option('-batchnorm', 1)
 
 -- Optimization options
-cmd:option('-max_epochs', 30)
-cmd:option('-learning_rate', 2e-3)
-cmd:option('-grad_clip', 5)
+cmd:option('-max_epochs', 50)
+cmd:option('-learning_rate', 1e-3)
+cmd:option('-grad_clip', 1)
 cmd:option('-lr_decay_every', 5)
 cmd:option('-lr_decay_factor', 0.5)
 
@@ -87,7 +85,7 @@ if opt.init_from ~= '' then
   print('Initializing from ', opt.init_from)
   model = torch.load(opt.init_from).model:type(dtype)
 else
-  model = nn.LanguageModel(opt_clone):type(dtype)
+  model = nn.TensLM(opt_clone):type(dtype)
 end
 local params, grad_params = model:getParameters() -- parameters
 local crit = nn.CrossEntropyCriterion():type(dtype) -- criterion (the output is score so we use this one)
