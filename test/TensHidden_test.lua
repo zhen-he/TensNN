@@ -81,17 +81,28 @@ function tests.testForward()
   for nodeId = 1, hidden.nodeNum do
     local decompNodeId = (nodeId - 1) % hidden.decompNum + 1
     -- get the predecessor states
-    local h1 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim)
-    local h2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId)
+    local h1, mean1, var1, norm1, isNormed1 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim)
+    local h2, mean2, var2, norm2, isNormed2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId)
+    local h1_, h2_ = h1, h2
+    -- batch normaliztion
+    if hidden.isBatchNorm then
+      if not isNormed1 then
+        hidden:batchNormForward(h1, mean1, var1, norm1)
+      end
+      if not isNormed2 then
+        hidden:batchNormForward(h2, mean2, var2, norm2)
+      end
+      h1_, h2_ = norm1, norm2
+    end
     -- update the current node
-    local f  = torch.sigmoid(torch.mm(h1, wf1)  + torch.mm(h2, wf2)  + bf)
-    local s  = torch.sigmoid(torch.mm(h1, ws1)  + torch.mm(h2, ws2)  + bs)
-    local g  = torch.sigmoid(torch.mm(h1, wg1)  + torch.mm(h2, wg2)  + bg)
+    local f  = torch.sigmoid(torch.mm(h1_, wf1) + torch.mm(h2_, wf2) + bf)
+    local s  = torch.sigmoid(torch.mm(h1_, ws1) + torch.mm(h2_, ws2) + bs)
+    local g  = torch.tanh(torch.mm(h1_, wg1) + torch.mm(h2_, wg2) + bg)
     local hn = torch.cmul(s, h1):add(h2):addcmul(-1, s, h2):cmul(f):add(g):addcmul(-1, f, g)
     h[{{}, unpack(coor)}]:copy(hn)
     hidden:MoveCoor(coor, 1)
   end
-  local naive_y = hidden.output:clone()
+  local naive_y = hidden._output:clone()
 
   tester:assertTensorEq(naive_y, y, 1e-10)
 end
@@ -99,9 +110,9 @@ end
 function tests.gradcheck()
   
   local inputShape = {5}
-  local tensShape = {2, 2, 2}
-  local nodeSize = 4
-  local batchSize = 3
+  local tensShape = {2, 2}
+  local nodeSize = 3
+  local batchSize = 2
 
   local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
 
