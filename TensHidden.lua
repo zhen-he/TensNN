@@ -308,17 +308,21 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   local norms = self.norms
   local meanp, varp, normp, isNormed = nil, nil, nil, nil
   local normIndicator = self.normIndicator
+  local normAllowed = false
 
   local preCoor = {}
   for i, v in ipairs(curCoor) do
     preCoor[i] = v
   end
 
-  if predecessorDim == self.hiddenDim and preCoor[predecessorDim] == 1 then
+  if predecessorDim == self.hiddenDim and preCoor[self.hiddenDim] == 1 then
     predecessorDim = self.hiddenDim - 1
   end
   if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
     preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
+    if predecessorDim > self.inputDim then -- batch normalization is only allowed along the tensorized dimension
+      normAllowed = true
+    end
   end
 
   local preNormCoor = {} -- for the normalization of the predecessor
@@ -369,7 +373,7 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
     end
   end
 
-  return hp, meanp, varp, normp, isNormed
+  return hp, meanp, varp, normp, normAllowed, isNormed
 end
 
 
@@ -380,7 +384,7 @@ function hidden:GetPredecessorGrad(curCoor, predecessorDim, gradIndicator)
     preCoor[i] = v
   end
 
-  if predecessorDim == self.hiddenDim and preCoor[predecessorDim] == 1 then
+  if predecessorDim == self.hiddenDim and preCoor[self.hiddenDim] == 1 then
     predecessorDim = self.hiddenDim - 1
   end
   if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
@@ -490,19 +494,24 @@ function hidden:updateOutput(input)
     local decompNodeId = (nodeId - 1) % self.decompNum + 1
 
     -- get the predecessor states
-    local h1, mean1, var1, norm1, isNormed1 = self:GetPredecessorState(x, coor, self.hiddenDim)
-    local h2, mean2, var2, norm2, isNormed2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1, mean1, var1, norm1, normAllowed1, isNormed1 = self:GetPredecessorState(x, coor, self.hiddenDim)
+    local h2, mean2, var2, norm2, normAllowed2, isNormed2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
     local h1_bn, h2_bn = h1, h2
 
    -- batch normaliztion
     if self.isBatchNorm then
-      if not isNormed1 then
-        self:batchNormForward(h1, mean1, var1, norm1)
+      if normAllowed1 then
+        if not isNormed1 then
+          self:batchNormForward(h1, mean1, var1, norm1)
+        end
+        h1_bn = norm1 
       end
-      if not isNormed2 then
-        self:batchNormForward(h2, mean2, var2, norm2)
+      if normAllowed2 then 
+        if not isNormed2 then
+          self:batchNormForward(h2, mean2, var2, norm2)
+        end
+        h2_bn = norm2 
       end
-      h1_bn, h2_bn = norm1, norm2
     end
 
     -- update the current node
@@ -557,8 +566,8 @@ function hidden:backward(input, gradOutput, scale)
     local decompNodeId = (nodeId - 1) % self.decompNum + 1
 
     -- get the predecessor states
-    local h1, mean1, var1, norm1 = self:GetPredecessorState(x, coor, self.hiddenDim)
-    local h2, mean2, var2, norm2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
+    local h1, mean1, var1, norm1, normAllowed1 = self:GetPredecessorState(x, coor, self.hiddenDim)
+    local h2, mean2, var2, norm2, normAllowed2 = self:GetPredecessorState(x, coor, self.hiddenDim - 1 - decompNodeId)
     local h1_bn, h2_bn = h1, h2
 
     -- get the predecessor gradients
@@ -576,7 +585,7 @@ function hidden:backward(input, gradOutput, scale)
     local s = curGates:narrow(2, H + 1, H)
     local g = curGates:narrow(2, 2 * H + 1, H)
 
-    local grad_a = self.grad_a:zero() -- gradients of activations
+    local grad_a = self.grad_a:zero()
     local grad_af  = grad_a:narrow(2, 1, H)
     local grad_as = grad_a:narrow(2, H + 1, H)
     local grad_ag = grad_a:narrow(2, 2 * H + 1, H)
@@ -584,26 +593,35 @@ function hidden:backward(input, gradOutput, scale)
     local one_minus_f = grad_ag:fill(1):add(-1, f) -- grad_ag is used as a buffer to store (1 - f)
     buff = h1:clone():add(-1, h2):cmul(s) -- a buffer to store (h1 - h2) * s
 
+    -- gradients of activations
     grad_af:copy(buff):add(h2):add(-1, g):cmul(f):cmul(one_minus_f):cmul(grad_hn)
     grad_as:fill(1):add(-1, s):cmul(buff):cmul(f):cmul(grad_hn)
     buff:fill(1):addcmul(-1, g, g)
     grad_ag:cmul(buff):cmul(grad_hn)
 
+    -- gradients of batch normalization outputs
     local grad_h1_bn = buff:mm(grad_a, w1:t()):clone()
     local grad_h2_bn = buff:mm(grad_a, w2:t()):clone()
 
+    -- gradients of batch normalization inputs
     if self.isBatchNorm then
-      self:batchNormBackward(h1, mean1, var1, grad_h1_bn)
-      self:batchNormBackward(h2, mean2, var2, grad_h2_bn)
-      h1_bn, h2_bn = norm1, norm2
+      if normAllowed1 then
+        self:batchNormBackward(h1, mean1, var1, grad_h1_bn)
+        h1_bn = norm1
+      end
+      if normAllowed2 then
+        self:batchNormBackward(h2, mean2, var2, grad_h2_bn)
+        h2_bn = norm2
+      end
     end
 
-    -- accumulate the gradients of parameters, as they are shared
+    -- gradients of parameters
     grad_w1:addmm(scale, h1_bn:t(), grad_a)
     grad_w2:addmm(scale, h2_bn:t(), grad_a)
     grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
     grad_b:add(scale, grad_b_sum)
 
+    -- gradients of h1
     buff:cmul(f, s):cmul(grad_hn):add(grad_h1_bn)
     if not isGrad1 then -- if no previous gradient, we overwrite it
       grad_h1:copy(buff)
@@ -611,6 +629,7 @@ function hidden:backward(input, gradOutput, scale)
       grad_h1:add(buff)
     end
 
+    -- gradients of h2
     buff:fill(1):add(-1, s):cmul(f):cmul(grad_hn):add(grad_h2_bn)
     if not isGrad2 then -- if no previous gradient, we overwrite it 
       grad_h2:copy(buff)
