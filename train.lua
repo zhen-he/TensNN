@@ -23,7 +23,7 @@ cmd:option('-init_from', '')
 cmd:option('-rnn_size', 128)
 cmd:option('-tensShape', {1})
 cmd:option('-dropout', 0)
-cmd:option('-batchnorm', 1)
+cmd:option('-batchnorm', 0)
 
 -- Optimization options
 cmd:option('-max_epochs', 30)
