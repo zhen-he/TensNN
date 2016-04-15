@@ -4,7 +4,7 @@ require 'nn'
 require 'TensHidden'
 local gradcheck = require 'util.gradcheck'
 
-isBN = 1
+isBN = 0
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -44,8 +44,8 @@ end
 
 function tests.testForward()
 
-  local inputShape = {3, 4}
-  local tensShape = {2, 2, 2}
+  local inputShape = {4, 3}
+  local tensShape = {1}
   local nodeSize = 3
   local batchSize = 2
 
@@ -81,18 +81,23 @@ function tests.testForward()
   for nodeId = 1, hidden.nodeNum do
     local decompNodeId = (nodeId - 1) % hidden.decompNum + 1
     -- get the predecessor states
-    local h1, mean1, var1, norm1, isNormed1 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim)
-    local h2, mean2, var2, norm2, isNormed2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId)
+    local h1, mean1, var1, norm1, normAllowed1, isNormed1 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim)
+    local h2, mean2, var2, norm2, normAllowed2, isNormed2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId)
     local h1_, h2_ = h1, h2
     -- batch normaliztion
     if hidden.isBatchNorm then
-      if not isNormed1 then
-        hidden:batchNormForward(h1, mean1, var1, norm1)
+      if normAllowed1 then
+        if not isNormed1 then
+          hidden:batchNormForward(h1, mean1, var1, norm1)
+        end
+        h1_ = norm1 
       end
-      if not isNormed2 then
-        hidden:batchNormForward(h2, mean2, var2, norm2)
+      if normAllowed2 then 
+        if not isNormed2 then
+          hidden:batchNormForward(h2, mean2, var2, norm2)
+        end
+        h2_ = norm2 
       end
-      h1_, h2_ = norm1, norm2
     end
     -- update the current node
     local f  = torch.sigmoid(torch.mm(h1_, wf1) + torch.mm(h2_, wf2) + bf)
@@ -112,7 +117,7 @@ function tests.gradcheck()
   local inputShape = {5}
   local tensShape = {2, 2}
   local nodeSize = 3
-  local batchSize = 2
+  local batchSize = 10
 
   local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
 
