@@ -61,17 +61,12 @@ function tests.testForward()
   -- Do a naive forward pass
   local h = hidden.h
   local N, H = batchSize, nodeSize
-  local wf1  = hidden.weight[{{1, H}, {1, H}}]
-  local ws1 = hidden.weight[{{1, H}, {H + 1, 2 * H}}]
-  local wg1 = hidden.weight[{{1, H}, {2 * H + 1, 3 * H}}]
-  
-  local wf2  = hidden.weight[{{H + 1, 2 * H}, {1, H}}]
-  local ws2 = hidden.weight[{{H + 1, 2 * H}, {H + 1, 2 * H}}]
-  local wg2 = hidden.weight[{{H + 1, 2 * H}, {2 * H + 1, 3 * H}}]
-  
-  local bf  = hidden.bias[{{1, H}}]:view(1, H):expand(N, H)
-  local bs = hidden.bias[{{H + 1, 2 * H}}]:view(1, H):expand(N, H)
-  local bg = hidden.bias[{{2 * H + 1, 3 * H}}]:view(1, H):expand(N, H)
+  local w1  = hidden.weight[{{1, H}}]
+  local w2  = hidden.weight[{{H + 1, 2 * H}}]
+
+  local gamma1 = hidden.bias[{{1, 3 * H}}]:view(1, 3 * H):expand(N, 3 * H)
+  local gamma2 = hidden.bias[{{3 * H + 1, 6 * H}}]:view(1, 3 * H):expand(N, 3 * H)
+  local beta = hidden.bias[{{6 * H + 1, 9 * H}}]:view(1, 3 * H):expand(N, 3 * H)
 
   local coor = {}
   for i = 1, hidden.hiddenDim do
@@ -81,24 +76,28 @@ function tests.testForward()
   for nodeId = 1, hidden.nodeNum do
     local decompNodeId = (nodeId - 1) % hidden.decompNum + 1
     -- get the predecessor states
-    local h1, mean1, var1, norm1, isNormed1 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim)
-    local h2, mean2, var2, norm2, isNormed2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId)
-    local h1_, h2_ = h1, h2
-    -- batch normaliztion
-    if hidden.isBatchNorm then
-      if not isNormed1 then
-        hidden:batchNormForward(h1, mean1, var1, norm1)
-      end
-      if not isNormed2 then
-        hidden:batchNormForward(h2, mean2, var2, norm2)
-      end
-      h1_, h2_ = norm1, norm2
-    end
+    local h1, mean1, var1, norm1 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim, 1)
+    local h2, mean2, var2, norm2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId, 2)
+    
     -- update the current node
-    local f  = torch.sigmoid(torch.mm(h1_, wf1) + torch.mm(h2_, wf2) + bf)
-    local s  = torch.sigmoid(torch.mm(h1_, ws1) + torch.mm(h2_, ws2) + bs)
-    local g  = torch.tanh(torch.mm(h1_, wg1) + torch.mm(h2_, wg2) + bg)
+    local gates, gates1, gates2
+    if hidden.isBatchNorm then
+      gates1 = torch.mm(h1, w1)
+      gates2 = torch.mm(h2, w2)
+      hidden:batchNormForward(gates1, mean1, var1, norm1)
+      hidden:batchNormForward(gates2, mean2, var2, norm2)
+      gates = torch.addcmul(beta, norm1, gamma1):addcmul(norm2, gamma2)
+    else
+      gates = torch.addmm(beta, h1, w1):addmm(h2, w2)
+    end
+
+    gates:narrow(2, 1, 2 * H):sigmoid() -- for gates
+    gates:narrow(2, 2 * H + 1, H):tanh() -- for new content
+    local f  = gates:narrow(2, 1, H)
+    local s = gates:narrow(2, H + 1, H)
+    local g = gates:narrow(2, 2 * H + 1, H)
     local hn = torch.cmul(s, h1):add(h2):addcmul(-1, s, h2):cmul(f):add(g):addcmul(-1, f, g)
+
     h[{{}, unpack(coor)}]:copy(hn)
     hidden:MoveCoor(coor, 1)
   end
@@ -109,10 +108,10 @@ end
 
 function tests.gradcheck()
   
-  local inputShape = {5}
-  local tensShape = {2, 2}
+  local inputShape = {4}
+  local tensShape = {2}
   local nodeSize = 3
-  local batchSize = 2
+  local batchSize = 5
 
   local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
 
