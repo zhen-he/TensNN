@@ -4,7 +4,7 @@ require 'nn'
 require 'TensHidden'
 local gradcheck = require 'util.gradcheck'
 
-isBN = 0
+isBN = 1
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -45,7 +45,7 @@ end
 function tests.testForward()
 
   local inputShape = {4, 3}
-  local tensShape = {1}
+  local tensShape = {3}
   local nodeSize = 3
   local batchSize = 2
 
