@@ -32,13 +32,13 @@ function LM:__init(kwargs)
   self.net:add(self.tensHidden)
 
   -- the last batch normalization layer
-  -- if self.batchnorm == 1 then
+  if self.batchnorm == 1 then
     self.bn_view_in = nn.View(1, 1, -1):setNumInputDims(3)
     self.net:add(self.bn_view_in)
-    self.net:add(nn.BatchNormalization(H, nil, nil, false))
+    self.net:add(nn.BatchNormalization(H))
     self.bn_view_out = nn.View(1, -1):setNumInputDims(2)
     self.net:add(self.bn_view_out)
-  -- end
+  end
 
   self.view1 = nn.View(1, 1, -1):setNumInputDims(3)
   self.view2 = nn.View(1, -1):setNumInputDims(2)
@@ -51,8 +51,10 @@ end
 
 function LM:updateOutput(input)
   local N, T = input:size(1), input:size(2)
-  self.bn_view_in:resetSize(N * T, -1)
-  self.bn_view_out:resetSize(N, T, -1)
+  if self.batchnorm == 1 then
+    self.bn_view_in:resetSize(N * T, -1)
+    self.bn_view_out:resetSize(N, T, -1)
+  end
   self.view1:resetSize(N * T, -1)
   self.view2:resetSize(N, T, -1)
 
