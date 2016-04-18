@@ -1,10 +1,10 @@
 require 'torch'
 require 'nn'
 
-require 'TensLM'
+require 'LanguageModel'
 
-BN = 'all'
-local tests = torch.TestSuite()
+
+local tests = {}
 local tester = torch.Tester()
 
 
@@ -18,19 +18,16 @@ end
 -- training test
 -- Just a smoke test to make sure model can run forward / backward
 function tests.simpleTest()
-  local inputShape = {3}
-  local tensShape = {2,2,2}
-  local nodeSize = 5
-  local batchSize = 2
-  local vocabSize = 6
-
-  local N, T, H, V = batchSize, inputShape[1], nodeSize, vocabSize
+  local N, T, D, H, V = 2, 3, 4, 5, 6
   local idx_to_token = {[1]='a', [2]='b', [3]='c', [4]='d', [5]='e', [6]='f'}
-  local LM = nn.TensLM{
-    idx_to_token = idx_to_token,
-    rnn_size = H,
-    tensShape = tensShape,
-    batchnorm = BN
+  local LM = nn.LanguageModel{
+    idx_to_token=idx_to_token,
+    model_type='rnn',
+    wordvec_size=D,
+    rnn_size=H,
+    num_layers=6,
+    dropout=0,
+    batchnorm=0,
   }
   local crit = nn.CrossEntropyCriterion()
   local params, grad_params = LM:getParameters()
@@ -48,16 +45,16 @@ end
 
 -- sampling test
 function tests.sampleTest()
-  local tensShape = {2,2,2}
-  local nodeSize = 5
-
-  local H = nodeSize
+  local N, T, D, H, V = 2, 3, 4, 5, 6
   local idx_to_token = {[1]='a', [2]='b', [3]='c', [4]='d', [5]='e', [6]='f'}
-  local LM = nn.TensLM{
-    idx_to_token = idx_to_token,
-    rnn_size = H,
-    tensShape = tensShape,
-    batchnorm = BN
+  local LM = nn.LanguageModel{
+    idx_to_token=idx_to_token,
+    model_type='rnn',
+    wordvec_size=D,
+    rnn_size=H,
+    num_layers=6,
+    dropout=0,
+    batchnorm=0,
   }
   
   local TT = 100
@@ -69,19 +66,19 @@ end
 
 -- encode/decode test
 function tests.encodeDecodeTest()
-  local tensShape = {2,2,2}
-  local nodeSize = 5
-
-  local H = nodeSize
   local idx_to_token = {
     [1]='a', [2]='b', [3]='c', [4]='d',
     [5]='e', [6]='f', [7]='g', [8]=' ',
   }
-  local LM = nn.TensLM{
+  local N, T, D, H, V = 2, 3, 4, 5, 7
+  local LM = nn.LanguageModel{
     idx_to_token=idx_to_token,
-    rnn_size = H,
-    tensShape = tensShape,
-    batchnorm = BN
+    model_type='rnn',
+    wordvec_size=D,
+    rnn_size=H,
+    num_layers=6,
+    dropout=0,
+    batchnorm=0,
   }
 
   local s = 'a bad feed'
@@ -92,7 +89,6 @@ function tests.encodeDecodeTest()
   local s2 = LM:decode_string(encoded)
   tester:assert(s == s2)
 end
-
 
 tester:add(tests)
 tester:run()

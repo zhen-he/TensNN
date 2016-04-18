@@ -4,7 +4,7 @@ require 'nn'
 require 'TensHidden'
 local gradcheck = require 'util.gradcheck'
 
-isBN = 1
+BN = 'all'
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -49,7 +49,7 @@ function tests.testForward()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
+  local hidden = nn.TensHidden(tensShape, nodeSize, BN)
 
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
   local x  = torch.randn(torch.LongStorage(sz_x))
@@ -85,7 +85,7 @@ function tests.testForward()
     local h2, mean2, var2, norm2, normAllowed2, isNormed2 = hidden:GetPredecessorState(x, coor, hidden.hiddenDim - 1 - decompNodeId)
     local h1_, h2_ = h1, h2
     -- batch normaliztion
-    if hidden.isBatchNorm then
+    if hidden.batchNorm ~= 'no' then
       if normAllowed1 then
         if not isNormed1 then
           hidden:batchNormForward(h1, mean1, var1, norm1)
@@ -119,7 +119,7 @@ function tests.gradcheck()
   local nodeSize = 3
   local batchSize = 10
 
-  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
+  local hidden = nn.TensHidden(tensShape, nodeSize, BN)
 
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
   local x  = torch.randn(torch.LongStorage(sz_x))
@@ -180,7 +180,7 @@ function tests.noHiddenTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
+  local hidden = nn.TensHidden(tensShape, nodeSize, BN)
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
   for t = 1, 3 do
@@ -206,7 +206,7 @@ function tests.rememberStatesTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(tensShape, nodeSize, isBN)
+  local hidden = nn.TensHidden(tensShape, nodeSize, BN)
   hidden.remember_states = true
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
