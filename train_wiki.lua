@@ -77,18 +77,20 @@ for k, v in pairs(vocab.idx_to_token) do
   idx_to_token[tonumber(k)] = v
 end
 
+
 -- Initialize the model and criterion
-local opt_clone = torch.deserialize(torch.serialize(opt)) -- used as copy
-opt_clone.idx_to_token = idx_to_token
 local model = nil  -- model
 if opt.init_from ~= '' then
   print('Initializing from ', opt.init_from)
   model = torch.load(opt.init_from).model:type(dtype)
 else
+  local opt_clone = torch.deserialize(torch.serialize(opt)) -- used as copy
+  opt_clone.idx_to_token = idx_to_token
   model = nn.TensLM(opt_clone):type(dtype)
 end
 local params, grad_params = model:getParameters() -- parameters
 local crit = nn.CrossEntropyCriterion():type(dtype) -- criterion (the output is score so we use this one)
+
 
 -- Set up some variables we will use below
 local N, T = opt.batch_size, opt.seq_length
@@ -105,6 +107,7 @@ if opt.memory_benchmark == 1 then
   local free, total = cutorch.getMemoryUsage(cutorch.getDevice())
   init_memory_usage = total - free
 end
+
 
 -- Loss function that we pass to an optim method
 local function f(w)
@@ -155,6 +158,7 @@ local function f(w)
   return loss, grad_params
 end
 
+
 -- Train the model!
 local optim_config = {learningRate = opt.learning_rate}
 local num_train = loader.split_sizes['train']
@@ -188,11 +192,11 @@ for i = 1, num_iterations do
   -- Maybe save a checkpoint
   local check_every = opt.checkpoint_every
   if (check_every > 0 and i % check_every == 0) or i == num_iterations then
-    -- Evaluate loss on the validation set. Note that we reset the state of
-    -- the model; this might happen in the middle of an epoch, but that
-    -- shouldn't cause too much trouble.
+    
+    -- Evaluate loss on the validation set
     model:evaluate() -- switch to validation mode
-    model:resetStates()
+    local h0_save = model.tensHidden.h0:clone() -- save h0
+    model:resetStates() -- clear h0
     local num_val = loader.split_sizes['val']
     local val_loss = 0
     for j = 1, num_val do
@@ -206,7 +210,7 @@ for i = 1, num_iterations do
     print('val_loss = ', val_loss)
     table.insert(val_loss_history, val_loss)
     table.insert(val_loss_history_it, i)
-    model:resetStates()
+    model:resetStates() -- clear h0 again
     model:training() -- switch back to training mode
 
     -- First save a JSON checkpoint, excluding the model
@@ -223,15 +227,15 @@ for i = 1, num_iterations do
     paths.mkdir(paths.dirname(filename))
     utils.write_json(filename, checkpoint)
 
-    -- Now save a torch checkpoint with the model
-    -- Cast the model to float before saving so it can be used on CPU
-    model:clearState()
-    model:float()
+    -- Save a torch checkpoint with the model
+    model:clearState() -- clear the intermiate states
+    model:float() -- cast the model to float before saving so it can be used on CPU
     checkpoint.model = model
     local filename = string.format('%s_%d.t7', opt.checkpoint_name, i)
     paths.mkdir(paths.dirname(filename))
     torch.save(filename, checkpoint)
     model:type(dtype) -- convert back the type
+    model.tensHidden.h0 = h0_save:clone()
     params, grad_params = model:getParameters()
     collectgarbage()
   end

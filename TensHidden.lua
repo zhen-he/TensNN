@@ -5,10 +5,13 @@ require 'nn'
 local hidden, parent = torch.class('nn.TensHidden', 'nn.Module')
 
 
-function hidden:__init(tensShape, nodeSize, isBatchNorm)
+function hidden:__init(tensShape, nodeSize, batchNorm)
 
   assert(#tensShape > 0, 'invalid tensorizing shape')
   assert(nodeSize > 0, 'invalid node size')
+  batchNorm = (batchNorm or 'no')
+  assert(batchNorm == 'no' or batchNorm == 'input' or batchNorm == 'tensor'
+    or batchNorm == 'all', 'invalid batchnorm selection')
 
   parent.__init(self)
 
@@ -16,7 +19,7 @@ function hidden:__init(tensShape, nodeSize, isBatchNorm)
   self.tensShape = tensShape -- table
   self.nodeSize = nodeSize
   self.batchSize = nil
-  self.isBatchNorm = (isBatchNorm or 0) == 1
+  self.batchNorm = batchNorm
 
   local H = self.nodeSize
   self.weight = torch.Tensor(2 * H, 3 * H) -- forget gate, select gate, new content
@@ -176,7 +179,7 @@ function hidden:InitState(input)
     self._grad_h0 = self.stateAndGradBuff[gradInitStateRegion]
   end
 
-  if self.isBatchNorm then
+  if self.batchNorm ~= 'no' then
     if self.means:nElement() == 0 or isInputShapeChanged then
       local sz = {}
       for _, v in ipairs(self.hiddenShape) do
@@ -325,14 +328,19 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   end
   if predecessorDim < self.hiddenDim then -- if not along the decomposing dimension
     preCoor[self.hiddenDim] = self.decompNum -- point to the last decompesed one of the other dimension
-    if predecessorDim > self.inputDim then -- batch normalization is only allowed along the tensorized dimension
+    -- decide if apply batch normalization based on the specified batchnorm direction
+    if self.batchNorm == 'all' then
+      normAllowed = true
+    elseif self.batchNorm == 'tensor' and predecessorDim > self.inputDim then
+      normAllowed = true
+    elseif self.batchNorm == 'input' and predecessorDim <= self.inputDim then
       normAllowed = true
     end
   end
 
   local meanp, varp, normp, meanAvgp, varAvgp = nil, nil, nil, nil, nil
   local preNormCoor = {} -- for the normalization of the predecessor
-  if self.isBatchNorm then
+  if self.batchNorm ~= 'no' then
     for i, v in ipairs(preCoor) do
       preNormCoor[i] = v + 1
     end
@@ -374,11 +382,14 @@ function hidden:GetPredecessorState(input, curCoor, predecessorDim)
   end
 
   local isNormed = nil
-  if self.isBatchNorm then
-    isNormed = true
+  if self.batchNorm ~= 'no' then
     if self.normIndicator[preNormCoor] == 0 then
       isNormed = false
-      self.normIndicator[preNormCoor] = 1 
+      if normAllowed then
+        self.normIndicator[preNormCoor] = 1
+      end
+    else
+      isNormed = true
     end
   end
 
@@ -477,7 +488,7 @@ function hidden:updateOutput(input)
   local w1 = self.weight[{{1, H}}] -- weights for h1
   local w2 = self.weight[{{H + 1, 2 * H}}] -- weights for h2
 
-  if self.isBatchNorm then
+  if self.batchNorm ~= 'no' then
     self.normIndicator:zero()
   end
 
@@ -498,7 +509,7 @@ function hidden:updateOutput(input)
     local h1_bn, h2_bn = h1, h2
 
    -- batch normaliztion
-    if self.isBatchNorm then
+    if self.batchNorm ~= 'no' then
       if normAllowed1 then
         if not isNormed1 then
           self:batchNormForward(h1, mean1, var1, meanAvg1, varAvg1, norm1)
@@ -603,7 +614,7 @@ function hidden:backward(input, gradOutput, scale)
     local grad_h2_bn = buff:mm(grad_a, w2:t()):clone()
 
     -- gradients of batch normalization inputs
-    if self.isBatchNorm then
+    if self.batchNorm ~= 'no' then
       if normAllowed1 then
         self:batchNormBackward(h1, mean1, var1, norm1, grad_h1_bn)
         h1_bn = norm1
