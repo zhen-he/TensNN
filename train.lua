@@ -18,9 +18,9 @@ cmd:option('-seq_length', 50)
 
 -- Model options
 cmd:option('-init_from', '')
-cmd:option('-rnn_size', 256)
+cmd:option('-rnn_size', 128)
 cmd:option('-tensShape', {1})
-cmd:option('-batchnorm', 'no') -- no, input, tensor, all
+cmd:option('-batchnorm', 'tensor') -- no, input, tensor, all
 
 -- Optimization options
 cmd:option('-max_epochs', 30)
@@ -32,7 +32,7 @@ cmd:option('-lr_decay_factor', 0.5)
 -- Output options
 cmd:option('-print_every', 10)
 cmd:option('-checkpoint_every', 1000)
-cmd:option('-checkpoint_name', 'cv/checkpoint')
+cmd:option('-result_dir', 'result/')
 
 -- Benchmark options
 cmd:option('-speed_benchmark', 0) -- record the time consuming
@@ -43,6 +43,15 @@ cmd:option('-gpu', 0)
 cmd:option('-gpu_backend', 'cuda')
 
 local opt = cmd:parse(arg)
+
+
+-- directory names for saving
+local filenamehd = 't'
+for _, v in ipairs(opt.tensShape) do
+  filenamehd = filenamehd .. v
+end
+filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. opt.batchnorm .. 'BN'
+filenamehd = opt.result_dir .. filenamehd .. '/' .. filenamehd .. '_'
 
 
 -- Set up GPU stuff
@@ -164,25 +173,12 @@ local num_train = loader.split_sizes['train']
 local num_iterations = opt.max_epochs * num_train -- the maximum iteration number
 model:training()
 for i = 1, num_iterations do
-  local epoch = math.floor(i / num_train) + 1
 
-  -- Check if we are at the end of an epoch
-  if i % num_train == 0 then
-    model:resetStates() -- Reset hidden states
-
-    -- Maybe decay learning rate
-    if epoch % opt.lr_decay_every == 0 then
-      local old_lr = optim_config.learningRate
-      optim_config = {learningRate = old_lr * opt.lr_decay_factor}
-    end
-  end
-
-  -- Take a gradient step and maybe print
-  -- Note that adam returns a singleton array of losses
+  -- Take a gradient step and maybe print, note that adam returns a singleton array of losses
   local _, loss = optim.adam(f, params, optim_config)
   table.insert(train_loss_history, loss[1])
   if opt.print_every > 0 and i % opt.print_every == 0 then
-    local float_epoch = i / num_train + 1
+    local float_epoch = i / num_train
     local msg = 'Epoch %.2f / %d, i = %d / %d, loss = %f'
     local args = {msg, float_epoch, opt.max_epochs, i, num_iterations, loss[1]}
     print(string.format(unpack(args)))
@@ -191,10 +187,16 @@ for i = 1, num_iterations do
   -- Maybe save a checkpoint
   local check_every = opt.checkpoint_every
   if (check_every > 0 and i % check_every == 0) or i == num_iterations then
+  
+    -- save current model to disk
+    local tmpFileName = string.format('%stmp.t7', filenamehd)
+    paths.mkdir(paths.dirname(tmpFileName))
+    model:float()
+    torch.save(tmpFileName, model)
+    model:type(dtype)
     
     -- Evaluate loss on the validation set
     model:evaluate() -- switch to validation mode
-    local h0_save = model.tensHidden.h0:clone() -- save h0
     model:resetStates() -- clear h0
     local num_val = loader.split_sizes['val']
     local val_loss = 0
@@ -203,14 +205,16 @@ for i = 1, num_iterations do
       xv = xv:type(dtype)
       yv = yv:type(dtype):view(N * T)
       local scores = model:forward(xv):view(N * T, -1)
-      val_loss = val_loss + crit:forward(scores, yv)
+      if j > 1 then
+        val_loss = val_loss + crit:forward(scores, yv)
+      end
     end
-    val_loss = val_loss / num_val
+    val_loss = val_loss / (num_val - 1)
+    model:resetStates() -- clear h0
+    model:training() -- switch back to training
     print('val_loss = ', val_loss)
     table.insert(val_loss_history, val_loss)
     table.insert(val_loss_history_it, i)
-    model:resetStates() -- clear h0 again
-    model:training() -- switch back to training mode
 
     -- First save a JSON checkpoint, excluding the model
     local checkpoint = {
@@ -221,21 +225,31 @@ for i = 1, num_iterations do
       forward_backward_times = forward_backward_times,
       memory_usage = memory_usage,
     }
-    local filename = string.format('%s_%d.json', opt.checkpoint_name, i)
-    -- Make sure the output directory exists before we try to write it
+    local filename = string.format('%s%d.json', filenamehd, i)
     paths.mkdir(paths.dirname(filename))
     utils.write_json(filename, checkpoint)
 
     -- Save a torch checkpoint with the model
-    model:clearState() -- clear the intermiate states
+    model:clearState() -- clear the intermiate states for saving
+    local filename = string.format('%s%d.t7', filenamehd, i)
+    paths.mkdir(paths.dirname(filename))
     model:float() -- cast the model to float before saving so it can be used on CPU
     checkpoint.model = model
-    local filename = string.format('%s_%d.t7', opt.checkpoint_name, i)
-    paths.mkdir(paths.dirname(filename))
     torch.save(filename, checkpoint)
+    model = torch.load(tmpFileName) -- recover the model for training from disk
     model:type(dtype) -- convert back the type
-    model.tensHidden.h0 = h0_save:clone()
     params, grad_params = model:getParameters()
     collectgarbage()
+  end
+  
+  -- When at the end of an epoch
+  if i % num_train == 0 then
+    model:resetStates() -- Reset hidden states
+    -- Maybe decay learning rate
+    local epoch = math.ceil(i / num_train)
+    if epoch % opt.lr_decay_every == 0 then
+      local old_lr = optim_config.learningRate
+      optim_config = {learningRate = old_lr * opt.lr_decay_factor}
+    end
   end
 end
