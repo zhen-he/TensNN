@@ -47,9 +47,7 @@ local opt = cmd:parse(arg)
 
 -- directory names for saving
 local filenamehd = 't'
-for _, v in ipairs(opt.tensShape) do
-  filenamehd = filenamehd .. v
-end
+for _, v in ipairs(opt.tensShape) do filenamehd = filenamehd .. v end
 filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. opt.batchnorm .. 'BN'
 filenamehd = opt.result_dir .. filenamehd .. '/' .. filenamehd .. '_'
 
@@ -168,7 +166,7 @@ end
 
 
 -- Train the model!
-local optim_config = {learningRate = opt.learning_rate}
+local optim_config = {learningRate = opt.learning_rate, beta2 = 0.99}
 local num_train = loader.split_sizes['train']
 local num_iterations = opt.max_epochs * num_train -- the maximum iteration number
 model:training()
@@ -176,6 +174,7 @@ for i = 1, num_iterations do
 
   -- Take a gradient step and maybe print, note that adam returns a singleton array of losses
   local _, loss = optim.adam(f, params, optim_config)
+  loss[1] = loss[1] / math.log(2) -- using the bits-per-character (BPC) metric
   table.insert(train_loss_history, loss[1])
   if opt.print_every > 0 and i % opt.print_every == 0 then
     local float_epoch = i / num_train
@@ -206,7 +205,7 @@ for i = 1, num_iterations do
       yv = yv:type(dtype):view(N * T)
       local scores = model:forward(xv):view(N * T, -1)
       if j > 1 then
-        val_loss = val_loss + crit:forward(scores, yv)
+        val_loss = val_loss + crit:forward(scores, yv) / math.log(2)
       end
     end
     val_loss = val_loss / (num_val - 1)

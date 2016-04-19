@@ -56,7 +56,9 @@ for i = 1, num do
   x = x:type(dtype)
   y = y:type(dtype):view(N * T)
   local scores = model:forward(x):view(N * T, -1)
-  loss = loss + crit:forward(scores, y)
+  if i > 1 then
+    loss = loss + crit:forward(scores, y) / math.log(2)
+  end
 end
 loss = loss / num
 print(string.format('%s loss = %f', opt.split, loss))

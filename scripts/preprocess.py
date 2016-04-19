@@ -7,16 +7,25 @@ import codecs
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--input_txt', default='data/enwik8')
-parser.add_argument('--output_h5', default='data/enwik8.h5')
-parser.add_argument('--output_json', default='data/enwik8.json')
+parser.add_argument('--input_txt', default='enwik8')
+parser.add_argument('--output_h5', default='enwik8.h5')
+parser.add_argument('--output_json', default='enwik8.json')
 parser.add_argument('--val_frac', type=float, default=0.05)
 parser.add_argument('--test_frac', type=float, default=0.05)
 parser.add_argument('--quiet', action='store_true')
 parser.add_argument('--encoding', default='bytes')
-# parser.add_argument('--input_txt', default='data/tiny-shakespeare.txt')
-# parser.add_argument('--output_h5', default='data/tiny-shakespeare.h5')
-# parser.add_argument('--output_json', default='data/tiny-shakespeare.json')
+
+# parser.add_argument('--input_txt', default='haha.txt')
+# parser.add_argument('--output_h5', default='haha.h5')
+# parser.add_argument('--output_json', default='haha.json')
+# parser.add_argument('--val_frac', type=float, default=0.2)
+# parser.add_argument('--test_frac', type=float, default=0.3)
+# parser.add_argument('--quiet', action='store_true')
+# parser.add_argument('--encoding', default='bytes')
+
+# parser.add_argument('--input_txt', default='tiny-shakespeare.txt')
+# parser.add_argument('--output_h5', default='tiny-shakespeare.h5')
+# parser.add_argument('--output_json', default='tiny-shakespeare.json')
 # parser.add_argument('--val_frac', type=float, default=0.1)
 # parser.add_argument('--test_frac', type=float, default=0.1)
 # parser.add_argument('--quiet', action='store_true')
@@ -36,6 +45,9 @@ if __name__ == '__main__':
       for char in line:
         if char not in token_to_idx:
           token_to_idx[char] = len(token_to_idx) + 1
+    lastChar = '\n' # used as the target of the last character
+    if lastChar not in token_to_idx:
+          token_to_idx[lastChar] = len(token_to_idx) + 1
 
   # Now we can figure out the split sizes
   val_size = int(args.val_frac * total_size)
@@ -58,9 +70,9 @@ if __name__ == '__main__':
 
   # Just load data into memory ... we'll have to do something more clever
   # for huge datasets but this should be fine for now
-  train = np.zeros(train_size, dtype=dtype)
-  val = np.zeros(val_size, dtype=dtype)
-  test = np.zeros(test_size, dtype=dtype)
+  train = np.zeros(train_size + 1, dtype=dtype)
+  val = np.zeros(val_size + 1, dtype=dtype)
+  test = np.zeros(test_size + 1, dtype=dtype)
   splits = [train, val, test]
 
   # Go through the file again and write data to numpy arrays
@@ -70,9 +82,14 @@ if __name__ == '__main__':
       for char in line:
         splits[split_idx][cur_idx] = token_to_idx[char]
         cur_idx += 1
-        if cur_idx == splits[split_idx].size:
+        if cur_idx == splits[split_idx].size - 1:
           split_idx += 1
           cur_idx = 0
+
+  # for the target of the last character
+  train[train.size - 1] = val[0]
+  val[val.size - 1] = test[0]
+  test[test.size - 1] = token_to_idx['\n']
 
   # Write data to HDF5 file
   with h5py.File(args.output_h5, 'w') as f:
