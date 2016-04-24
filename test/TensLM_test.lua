@@ -3,7 +3,7 @@ require 'nn'
 
 require 'TensLM'
 
-BN = 'all'
+dropout = 0.25
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -29,8 +29,9 @@ function tests.simpleTest()
   local LM = nn.TensLM{
     idx_to_token = idx_to_token,
     rnn_size = H,
+    inputShape = inputShape,
     tensShape = tensShape,
-    batchnorm = BN
+    dropout = dropout
   }
   local crit = nn.CrossEntropyCriterion()
   local params, grad_params = LM:getParameters()
@@ -48,6 +49,7 @@ end
 
 -- sampling test
 function tests.sampleTest()
+  local inputShape = {3}
   local tensShape = {2,2,2}
   local nodeSize = 5
 
@@ -56,8 +58,9 @@ function tests.sampleTest()
   local LM = nn.TensLM{
     idx_to_token = idx_to_token,
     rnn_size = H,
+    inputShape = inputShape,
     tensShape = tensShape,
-    batchnorm = BN
+    dropout = dropout
   }
   
   local TT = 100
@@ -69,6 +72,7 @@ end
 
 -- encode/decode test
 function tests.encodeDecodeTest()
+  local inputShape = {3}
   local tensShape = {2,2,2}
   local nodeSize = 5
 
@@ -80,8 +84,9 @@ function tests.encodeDecodeTest()
   local LM = nn.TensLM{
     idx_to_token=idx_to_token,
     rnn_size = H,
+    inputShape = inputShape,
     tensShape = tensShape,
-    batchnorm = BN
+    dropout = dropout
   }
 
   local s = 'a bad feed'

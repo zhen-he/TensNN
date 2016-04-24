@@ -19,42 +19,34 @@ function LM:__init(kwargs)
   end
 
   self.rnn_size = utils.get_kwarg(kwargs, 'rnn_size')
+  self.inputShape = utils.get_kwarg(kwargs, 'inputShape')
   self.tensShape = utils.get_kwarg(kwargs, 'tensShape')
-  self.batchnorm = utils.get_kwarg(kwargs, 'batchnorm')
+  self.dropout = utils.get_kwarg(kwargs, 'dropout')
 
   local V, H = self.vocab_size, self.rnn_size
 
   self.net = nn.Sequential()
-  self.net:add(nn.LookupTable(V, H)) -- embedding
+  self.net:add(nn.LookupTable(V, 2 * H)) -- embedding
 
-  self.tensHidden = nn.TensHidden(self.tensShape, H, self.batchnorm)
+  self.tensHidden = nn.TensHidden(self.inputShape, self.tensShape, H, self.dropout)
   self.tensHidden.remember_states = true
   self.net:add(self.tensHidden)
 
-  -- the last batch normalization layer
- if self.batchnorm == 'tensor' or self.batchnorm == 'all' then
-   self.bn_view_in = nn.View(1, 1, -1):setNumInputDims(3)
-   self.net:add(self.bn_view_in)
-   self.net:add(nn.BatchNormalization(H))
-   self.bn_view_out = nn.View(1, -1):setNumInputDims(2)
-   self.net:add(self.bn_view_out)
- end
+  if self.dropout then
+    self.net:add(nn.Dropout(self.dropout))
+  end
 
   self.view1 = nn.View(1, 1, -1):setNumInputDims(3)
   self.view2 = nn.View(1, -1):setNumInputDims(2)
 
   self.net:add(self.view1)
-  self.net:add(nn.Linear(H, V))
+  self.net:add(nn.Linear(2 * H, V))
   self.net:add(self.view2)
 end
 
 
 function LM:updateOutput(input)
   local N, T = input:size(1), input:size(2)
-  if self.batchnorm == 'tensor' or self.batchnorm == 'all' then
-    self.bn_view_in:resetSize(N * T, -1)
-    self.bn_view_out:resetSize(N, T, -1)
-  end
   self.view1:resetSize(N * T, -1)
   self.view2:resetSize(N, T, -1)
 

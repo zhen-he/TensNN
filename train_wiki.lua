@@ -19,8 +19,9 @@ cmd:option('-seq_length', 100)
 -- Model options
 cmd:option('-init_from', '')
 cmd:option('-rnn_size', 700)
+cmd:option('-inputShape', {1})
 cmd:option('-tensShape', {1})
-cmd:option('-batchnorm', 'no') -- no, input, tensor, all
+cmd:option('-dropout', false)
 
 -- Optimization options
 cmd:option('-max_epochs', 50)
@@ -47,8 +48,10 @@ local opt = cmd:parse(arg)
 
 -- directory names for saving
 local filenamehd = 't'
+local dp = 'nodp'
+if opt.dropout then dp = 'dp' .. opt.dropout end
 for _, v in ipairs(opt.tensShape) do filenamehd = filenamehd .. v end
-filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. opt.batchnorm .. 'BN'
+filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. dp
 filenamehd = opt.result_dir .. filenamehd .. '/' .. filenamehd .. '_'
 
 

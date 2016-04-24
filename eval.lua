@@ -60,5 +60,5 @@ for i = 1, num do
     loss = loss + crit:forward(scores, y) / math.log(2)
   end
 end
-loss = loss / num
+loss = loss / (num - 1)
 print(string.format('%s loss = %f', opt.split, loss))
