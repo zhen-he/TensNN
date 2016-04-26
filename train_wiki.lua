@@ -20,7 +20,7 @@ cmd:option('-seq_length', 100)
 cmd:option('-init_from', '')
 cmd:option('-rnn_size', 700)
 cmd:option('-inputShape', {1})
-cmd:option('-tensShape', {1})
+cmd:option('-tensShape', {4, 4})
 cmd:option('-dropout', false)
 
 -- Optimization options
