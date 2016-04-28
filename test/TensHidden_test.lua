@@ -29,7 +29,7 @@ local function GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchS
 
   local sz_h = {N}
   for i, v in ipairs(inputShape) do
-    if i ~= #inputShape then
+    if i > 1 then
       table.insert(sz_h, v)
     end
   end
@@ -111,104 +111,109 @@ function tests.gradcheck()
 end
 
 
--- Make sure that everything works correctly when we don't pass an initial cell
--- state; in this case we do pass an initial hidden state and an input sequence
-function tests.noCellTest()
-
-  local inputShape = {3,4}
-  local tensShape = {2,2,2}
-  local nodeSize = 3
-  local batchSize = 2
-
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
-  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
-
-  for t = 1, 3 do
-    local x  = torch.randn(torch.LongStorage(sz_x))
-    local h0 = torch.randn(torch.LongStorage(sz_h))
-    local dout = torch.randn(torch.LongStorage(sz_x))
-
-    local out = hidden:forward{x, h0}
-    local din = hidden:backward({x, h0}, dout)
-
-    tester:assert(torch.type(din) == 'table')
-    tester:assert(#din == 2)
-    check_size(din[1], sz_x)
-    check_size(din[2], sz_h)
-
-    -- Make sure the initial cell state got reset to zero
-    tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
-  end
-end
-
-
--- Make sure that everything works when we don't pass initial hidden or initial
--- cell state; in this case we only pass input sequence of vectors
-function tests.noHiddenTest()
-
-  local inputShape = {3, 4}
-  local tensShape = {2, 2, 2}
-  local nodeSize = 3
-  local batchSize = 2
-
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
-  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
-
-  for t = 1, 3 do
-    local x  = torch.randn(torch.LongStorage(sz_x))
-    local dout = torch.randn(torch.LongStorage(sz_x))
-
-    local out = hidden:forward(x)
-    local din = hidden:backward(x, dout)
-
-    tester:assert(torch.isTensor(din))
-    check_size(din, sz_x)
-
-    -- Make sure the initial cell state and initial hidden state are zero
-    tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
-    tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
-  end
-end
-
-
-function tests.rememberStatesTest()
-
-  local inputShape = {3, 4}
-  local tensShape = {2, 2, 2}
-  local nodeSize = 3
-  local batchSize = 2
-
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
-  hidden.remember_states = true
-  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
-
-  local final_h, final_c = nil, nil
-  for t = 1, 4 do
-    local x = torch.randn(torch.LongStorage(sz_x))
-    local dout = torch.randn(torch.LongStorage(sz_x))
-    local out = hidden:forward(x)
-    local din = hidden:backward(x, dout)
-
-    if t == 1 then
-      tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
-      tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
-    elseif t > 1 then
-      tester:assertTensorEq(hidden.c0, final_c, 0)
-      tester:assertTensorEq(hidden.h0, final_h, 0)
-    end
-    final_c = hidden.c:select(1 + hidden.inputDim, hidden.inputShape[hidden.inputDim]):clone()
-    final_h = hidden.h:select(1 + hidden.inputDim, hidden.inputShape[hidden.inputDim]):clone()
-  end
-
-  -- Initial states should reset to zero after we call resetStates
-  hidden:resetStates()
-  local x = torch.randn(torch.LongStorage(sz_x))
-  local dout = torch.randn(torch.LongStorage(sz_x))
-  hidden:forward(x)
-  hidden:backward(x, dout)
-  tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
-  tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
-end
+---- Make sure that everything works correctly when we don't pass an initial cell
+---- state; in this case we do pass an initial hidden state and an input sequence
+--function tests.noCellTest()
+--
+--  local inputShape = {3,4}
+--  local tensShape = {2,2,2}
+--  local nodeSize = 3
+--  local batchSize = 2
+--
+--  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+--  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
+--
+--  for t = 1, 3 do
+--    local x  = torch.randn(torch.LongStorage(sz_x))
+--    local h0 = torch.randn(torch.LongStorage(sz_h))
+--    local dout = torch.randn(torch.LongStorage(sz_x))
+--
+--    local out = hidden:forward{x, h0}
+--    local din = hidden:backward({x, h0}, dout)
+--
+--    tester:assert(torch.type(din) == 'table')
+--    tester:assert(#din == 2)
+--    check_size(din[1], sz_x)
+--    check_size(din[2], sz_h)
+--
+--    -- Make sure the initial cell state got reset to zero
+--    tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--  end
+--end
+--
+--
+---- Make sure that everything works when we don't pass initial hidden or initial
+---- cell state; in this case we only pass input sequence of vectors
+--function tests.noHiddenTest()
+--
+--  local inputShape = {3, 4}
+--  local tensShape = {2, 2, 2}
+--  local nodeSize = 3
+--  local batchSize = 2
+--
+--  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+--  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
+--
+--  for t = 1, 3 do
+--    local x  = torch.randn(torch.LongStorage(sz_x))
+--    local dout = torch.randn(torch.LongStorage(sz_x))
+--
+--    local out = hidden:forward(x)
+--    local din = hidden:backward(x, dout)
+--
+--    tester:assert(torch.isTensor(din))
+--    check_size(din, sz_x)
+--
+--    -- Make sure the initial cell state and initial hidden state are zero
+--    tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--    tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--  end
+--end
+--
+--
+--function tests.rememberStatesTest()
+--
+--  local inputShape = {3, 4}
+--  local tensShape = {2, 2, 2}
+--  local nodeSize = 3
+--  local batchSize = 2
+--
+--  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+--  hidden.remember_states = true
+--  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
+--
+--  local final_h, final_c = nil, nil
+--  for t = 1, 4 do
+--    local x = torch.randn(torch.LongStorage(sz_x))
+--    local dout = torch.randn(torch.LongStorage(sz_x))
+--    local out = hidden:forward(x)
+--    local din = hidden:backward(x, dout)
+--
+--    if t == 1 then
+--      tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--      tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--    elseif t > 1 then
+--      tester:assertTensorEq(hidden.c0, final_c, 0)
+--      tester:assertTensorEq(hidden.h0, final_h, 0)
+--    end
+--    
+--    hidden:RecoverBlock(hidden.states)
+--    local c0_ = hidden._c:select(2, hidden.inputShape[1] + 1)
+--    final_c = c0_:narrow(c0_:dim(), 1, nodeSize):clone()
+--    local h0_ = hidden._h:select(2, hidden.inputShape[1] + 1)
+--    final_h = h0_:narrow(h0_:dim(), 1, nodeSize):clone()
+--    hidden:SkewBlock(hidden.states)
+--  end
+--
+--  -- Initial states should reset to zero after we call resetStates
+--  hidden:resetStates()
+--  local x = torch.randn(torch.LongStorage(sz_x))
+--  local dout = torch.randn(torch.LongStorage(sz_x))
+--  hidden:forward(x)
+--  hidden:backward(x, dout)
+--  tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--  tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+--end
 
 
 tester:add(tests)
