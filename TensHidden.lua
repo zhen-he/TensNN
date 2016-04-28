@@ -31,14 +31,21 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
   self.gradBias = torch.Tensor(self.gateNum * H):zero()
   self:reset()
 
-  self.buff1 = torch.Tensor() -- This will be (N, H), a small buffer
-  self.buff2 = torch.Tensor() -- This will be (N, H), a small buffer
-  self.stateAndGradBuff = torch.Tensor()
+  self.buf_H_1 = torch.Tensor()
+  self.buf_H_2 = torch.Tensor()
+  self.buf_H_3 = torch.Tensor()
+  self.buf_DH_1 = torch.Tensor()
+  self.buf_DH_2 = torch.Tensor()
+  self.buf_2DH_1 = torch.Tensor()
+  self.buf_2DH_2 = torch.Tensor()
+  self.buf_GH_1 = torch.Tensor()
+  self.buf_GH_2 = torch.Tensor()
+
+  self.states = torch.Tensor()
+  self.grads = torch.Tensor()
 
   self.gates = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), gateNum * H)
   self.grad_b_sum = torch.Tensor() -- This will be (1, gateNum * H)
-  self.grad_a = torch.Tensor() -- This will be (N, gateNum * H)
-  self.gradIndicator = torch.ByteTensor() -- for gradients accumulation
 
   self.noise = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), tensDim * H), for drop out
   self.h_dp = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), tensDim * H), for drop out
@@ -73,6 +80,7 @@ end
 
 function hidden:InitState(input)
 
+  -- check if the input is changed, in which case we need to reinitialize the network
   local isInputShapeChanged = false
   if self.inputShape then
     if self.inputDim + 2 ~= input:dim() then
@@ -92,6 +100,7 @@ function hidden:InitState(input)
     end
   end
 
+  -- get the size of the network
   if not self.inputShape or isInputShapeChanged then
     self.batchSize = input:size(1)
 
@@ -103,76 +112,120 @@ function hidden:InitState(input)
     self.inputDim = #self.inputShape
     self.tensDim = #self.tensShape
 
-    self.hiddenShape = {} -- table
+    self.hiddenShape = {} -- the shape of the skewed block
+    local l = 0
     for _, v in ipairs(self.inputShape) do
       table.insert(self.hiddenShape, v)
+      l = l + v
     end
     for _, v in ipairs(self.tensShape) do
       table.insert(self.hiddenShape, v)
+      l = l + v
     end
     assert(self.hiddenDim == #self.hiddenShape, 'the dimension of of input mismatched with inputShape')
-    self.totalDim = self.hiddenDim + 2 -- one for batch and one for node vector
-
-    self.nodeNum = 1
-    for _, v in ipairs(self.hiddenShape) do
-        self.nodeNum = self.nodeNum * v
-    end
+    self.hiddenShape[1] = l - self.hiddenDim + 2
   end
 
-  local H, N = self.nodeSize, self.batchSize
+  -- initialize the network states
+  local N = self.batchSize
+  local H = self.nodeSize
+  local I = self.inputDim
+  local D = self.hiddenDim
+  local G = self.gateNum
+  local S = D + 2
+  local L = self.hiddenShape[1]
 
-  if self.stateAndGradBuff:nElement() == 0 or isInputShapeChanged then
+  if self.states:nElement() == 0 or isInputShapeChanged then
+
+    -- intialize states and gradients
     local sz = {N}
-    for _, v in ipairs(self.hiddenShape) do
-      table.insert(sz, v + 1)
-    end
-    table.insert(sz, 2 * H)
-    self.buff1:resize(N, H):zero()
-    self.buff2:resize(N, H):zero()
-    self.stateAndGradBuff:resize(torch.LongStorage(sz)):zero()
-    local stateRegion, gradRegion = {{}}, {{}}
-    local outputRegion, gradInputRegion, gradOutputRegion = {{}}, {{}}, {{}}
-    local gradInitStateRegion = {{}}
     for i, v in ipairs(self.hiddenShape) do
-      table.insert(stateRegion, {1, v})
-      table.insert(gradRegion, {1, v + 1})
-      if i < self.inputDim then -- the input dimension (except the last one)
-        table.insert(outputRegion, {1, v})
-        table.insert(gradInputRegion, {2, v + 1})
-        table.insert(gradOutputRegion, {2, v + 1})
-        table.insert(gradInitStateRegion, {2, v + 1})
-      elseif i == self.inputDim then -- the last input dimension
-        table.insert(outputRegion, {1, v})
-        table.insert(gradInputRegion, {2, v + 1})
-        table.insert(gradOutputRegion, {2, v + 1})
-        table.insert(gradInitStateRegion, 1)
-      elseif i < self.hiddenDim then -- the tensorized dimension (except the last one)
-        table.insert(outputRegion, v)
-        table.insert(gradInputRegion, 2)
-        table.insert(gradOutputRegion, v + 1)
-        table.insert(gradInitStateRegion, {2, v + 1})
-      else -- the last tensorized dimension
-        table.insert(outputRegion, v)
-        table.insert(gradInputRegion, 1)
-        table.insert(gradOutputRegion, v + 1)
-        table.insert(gradInitStateRegion, {2, v + 1})
+      table.insert(sz, v)
+    end
+    table.insert(sz, 2 * D * H)
+    self.states:resize(torch.LongStorage(sz)):zero()
+    self.grads:resize(torch.LongStorage(sz)):zero()
+
+    -- define variables (with '_') sharing memory with states or grads
+    self._h = self.states:narrow(S, 1, D * H)
+    self._c = self.states:narrow(S, D * H + 1, D * H)
+    self._grad_h = self.grads:narrow(S, 1, D * H)
+    self._grad_c = self.grads:narrow(S, D * H + 1, D * H)
+    
+    local initialState_region = {{}} -- whole batch
+    for i, v in ipairs(self.hiddenShape) do
+      if i == 1 then
+        table.insert(initialState_region, 1) -- first slice on the first input dimension
+      else
+        table.insert(initialState_region, {})
       end
     end
+    table.insert(initialState_region, {1, H})-- states of the first input dimension
+    self._h0 = self._h[initialState_region]
+    self._c0 = self._c[initialState_region]
+    self._grad_h0 = self._grad_h[initialState_region]
+    self._grad_c0 = self._grad_c[initialState_region]
 
-    local states = self.stateAndGradBuff[stateRegion]
-    local grads = self.stateAndGradBuff[gradRegion]
-    self._output = self.stateAndGradBuff[outputRegion]
-    self._grad_x = self.stateAndGradBuff[gradInputRegion]
-    self.gradOutput = self.stateAndGradBuff[gradOutputRegion]
-    local grad_h0c0 = self.stateAndGradBuff[gradInitStateRegion]
+    local input_region = {{}} -- whole batch
+    for i, v in ipairs(self.hiddenShape) do
+      if i == 1 then
+        table.insert(input_region, {1, self.inputShape[1]}) -- except the last slice of the first input dimension
+      elseif i <= I then
+        table.insert(input_region, {})
+      else
+        table.insert(input_region, 1) -- first slice on the tensorized dimensions
+      end
+    end
+    table.insert(input_region, {(D - 1) * H + 1, D * H})-- states of the last tensorized dimension
+    self._input_h = self._h[input_region]
+    self._input_c = self._c[input_region]
+    self._gradInput_h = self._grad_h[input_region]
+    self._gradInput_c = self._grad_c[input_region]
 
-    local S = self.totalDim
-    self.h = states:narrow(S, 1, H)
-    self.c = states:narrow(S, H + 1, H)
-    self.grad_h = grads:narrow(S, 1, H)
-    self.grad_c = grads:narrow(S, H + 1, H)
-    self._grad_h0 = grad_h0c0:narrow(grad_h0c0:dim(), 1, H)
-    self._grad_c0 = grad_h0c0:narrow(grad_h0c0:dim(), H + 1, H)
+    local output_region = {{}} -- whole batch
+    for i, v in ipairs(self.hiddenShape) do
+      if i == 1 then
+        table.insert(output_region, {L - self.inputShape[1] + 1, L})
+      elseif i <= I then
+        table.insert(output_region, {})
+      else
+        table.insert(output_region, v) -- last slice on the tensorized dimensions
+      end
+    end
+    table.insert(output_region, {(D - 1) * H + 1, D * H})-- states of the last tensorized dimension
+    self._output_h = self._h[output_region]
+    self._output_c = self._c[output_region]
+    self._gradOutput_h = self._grad_h[output_region]
+    self._gradOutput_c = self._grad_c[output_region]
+
+    -- layer buffers
+    table.remove(sz, 2) -- a slice along the first input dimension
+    sz[#sz] = H
+    self.buf_H_1:resize(torch.LongStorage(sz)):zero()
+    self.buf_H_2:resize(torch.LongStorage(sz)):zero()
+    self.buf_H_3:resize(torch.LongStorage(sz)):zero()
+    sz[#sz] = D * H
+    self.buf_DH_1:resize(torch.LongStorage(sz)):zero()
+    self.buf_DH_2:resize(torch.LongStorage(sz)):zero()
+    sz[#sz] = 2 * D * H
+    self.buf_2DH_1:resize(torch.LongStorage(sz)):zero()
+    self.buf_2DH_2:resize(torch.LongStorage(sz)):zero()
+    sz[#sz] = G * H
+    self.buf_GH_1:resize(torch.LongStorage(sz)):zero()
+    self.buf_GH_2:resize(torch.LongStorage(sz)):zero()
+  end
+
+  if self.gates:nElement() == 0 or isInputShapeChanged then
+    local sz = {N}
+    for _, v in ipairs(self.hiddenShape) do
+      table.insert(sz, v)
+    end
+    table.insert(sz, G * H)
+    self.gates:resize(torch.LongStorage(sz)):zero()
+  end
+
+  if self.grad_b_sum:nElement() == 0 then
+    self.grad_b_sum:resize(1, G * H):zero()
   end
 
   if self.dropout then
@@ -187,69 +240,54 @@ function hidden:InitState(input)
     end
   end
 
-  if self.gates:nElement() == 0 or isInputShapeChanged then
-    local sz = {N}
-    for _, v in ipairs(self.hiddenShape) do
-      table.insert(sz, v)
-    end
-    table.insert(sz, self.gateNum * H)
-    self.gates:resize(torch.LongStorage(sz)):zero()
-  end
-
-  if self.grad_b_sum:nElement() == 0 then
-    self.grad_b_sum:resize(1, self.gateNum * H):zero()
-  end
-
-  if self.grad_a:nElement() == 0 then
-    self.grad_a:resize(N, self.gateNum * H):zero()
-  end
-
-  if self.gradIndicator:nElement() == 0 or isInputShapeChanged then
-    local sz = {}
-    for _, v in ipairs(self.hiddenShape) do
-      table.insert(sz, v + 1)
-    end
-    self.gradIndicator:resize(torch.LongStorage(sz)):zero()
-
-    local gradOutputRegion = {}
-    for i, v in ipairs(self.hiddenShape) do
-      if i <= self.inputDim then
-        table.insert(gradOutputRegion, {2, v + 1})
-      else
-        table.insert(gradOutputRegion, v + 1)
-      end
-    end
-    self.gradIndicator[gradOutputRegion]:fill(1)
-  end
 end
 
 
 function hidden:clearState()
-  -- clear intermediate variables (the original clearState() in 'nn.Module' is overloaded, 
-  -- as it only clears 'output' and 'gradInput')
+  -- clear intermediate variables (the original clearState() in 'nn.Module' is overloaded, as it only clears 'output' and 'gradInput')
 
-  self.buff1:set()
-  self.buff2:set()
-  self.stateAndGradBuff:set()
-  self.h:set()
-  self.c:set()
-  self.output:set()
-  self._output:set()
+  -- network states
+  self.states:set()
   self.gates:set()
+  self.grads:set()
 
-  self.grad_x:set()
-  self._grad_x:set()
-  self.grad_h:set()
-  self.grad_c:set()
-  self.grad_h0:set()
-  self.grad_c0:set()
+  -- shared variables
+  self._h:set()
+  self._c:set()
+  self._grad_h:set()
+  self._grad_c:set()
+  self._h0:set()
+  self._c0:set()
   self._grad_h0:set()
   self._grad_c0:set()
-  self.gradOutput:set()
-  self.grad_b_sum:set()
-  self.grad_a:set()
-  self.gradIndicator:set()
+  self._input_h:set()
+  self._input_c:set()
+  self._gradInput_h:set()
+  self._gradInput_c:set()
+  self._output_h:set()
+  self._output_c:set()
+  self._gradOutput_h:set()
+  self._gradOutput_c:set()
 
+  -- layer buffers
+  self.buf_H_1:set()
+  self.buf_H_2:set()
+  self.buf_H_3:set()
+  self.buf_DH_1:set()
+  self.buf_DH_2:set()
+  self.buf_2DH_1:set()
+  self.buf_2DH_2:set()
+  self.buf_GH_1:set()
+  self.buf_GH_2:set()
+  self.grad_b_sum:set()
+
+  -- module interfaces
+  self.output:set()
+  self.grad_x:set()
+  self.grad_h0:set()
+  self.grad_c0:set()
+  
+  -- for drop out
   self.noise:set()
   self.h_dp:set()
 end
@@ -285,126 +323,6 @@ function hidden:UnpackInput(input)
 end
 
 
-function hidden:MoveCoor(curCoor, step) -- step must be 1 or -1
-
-  for i = #curCoor, 1, -1 do
-    curCoor[i] = curCoor[i] + step
-    if curCoor[i] > 0 and curCoor[i] <= self.hiddenShape[i] then
-      break
-    elseif curCoor[i] == 0 then
-      curCoor[i] = self.hiddenShape[i]
-    else
-      curCoor[i] = 1
-    end
-  end
-end
-
-
-function hidden:GetPredecessorState(input, curCoor)
-
-  local H, N = self.nodeSize, self.batchSize
-  local hps = {}
-  local cps = {}
-  local noiseps = {}
-  local h_dpps = {}
-
-  for predecessorDim = 1, self.hiddenDim do
-    local hp = torch.Tensor():type(self.weight:type())
-    local cp = torch.Tensor():type(self.weight:type())
-
-    local preCoor = {}
-    for i, v in ipairs(curCoor) do
-      preCoor[i] = v
-    end
-
-    if preCoor[predecessorDim] > 1 then
-      -- point to the previous node
-      preCoor[predecessorDim] = preCoor[predecessorDim] - 1
-      hp = self.h[{{}, unpack(preCoor)}] -- N * H
-      cp = self.c[{{}, unpack(preCoor)}] -- N * H
-    else -- the case that requires initial states (out of the network's shape)
-      hp:resize(N, H):zero()
-      cp:resize(N, H):zero()
-      if predecessorDim == self.inputDim then -- get value from the last states of previous batch
-        -- as h0 (c0) are the last slice on both input dimension h (c), we remove the corresponding coordinate
-        table.remove(preCoor, self.inputDim) -- remove the input dimension
-        hp = self.h0[{{}, unpack(preCoor)}] -- N * H
-        cp = self.c0[{{}, unpack(preCoor)}] -- N * H
-      elseif predecessorDim == self.hiddenDim then -- get value from input
-        local isFromInput = true
-        for i = self.inputDim + 1, self.hiddenDim - 1 do
-          if preCoor[i] ~= 1 then
-            isFromInput = false
-            break
-          end
-        end
-        if isFromInput then
-          local inputCoor = {}
-          for i = 1, self.inputDim do
-            inputCoor[i] = preCoor[i]
-          end
-          local hpcp = input[{{}, unpack(inputCoor)}] -- N * 2H
-          hp = hpcp[{{}, {1, H}}] -- N * H
-          cp = hpcp[{{}, {H + 1, 2 * H}}] -- N * H
-        end
-      end
-    end
-
-    if self.dropout and predecessorDim > self.inputDim then
-      local i = predecessorDim - self.inputDim - 1
-      local noisep = self.noise[{{}, unpack(curCoor)}]:narrow(2, i * H + 1, H)
-      local h_dpp = self.h_dp[{{}, unpack(curCoor)}]:narrow(2, i * H + 1, H)
-      table.insert(noiseps, noisep)
-      table.insert(h_dpps, h_dpp)
-    end
-
-    table.insert(hps, hp)
-    table.insert(cps, cp)
-  end
-
-  return hps, cps, noiseps, h_dpps
-end
-
-
-function hidden:GetPredecessorGrad(curCoor, gradIndicator)
-  local grad_hps = {}
-  local grad_cps = {}
-  local isGrads = {}
-
-  for predecessorDim = 1, self.hiddenDim do
-    local preCoor = {}
-    for i, v in ipairs(curCoor) do
-      preCoor[i] = v
-    end
-
-    preCoor[predecessorDim] = preCoor[predecessorDim] - 1
-
-    -- as the memory of states and state gradients are shared, we shift each dimension's
-    -- coordinate by 1 to avoid the states being overwritten by gradients 
-    for i, v in ipairs(preCoor) do
-      preCoor[i] = v + 1
-    end
-
-    local grad_hp = self.grad_h[{{}, unpack(preCoor)}] -- N * H
-    local grad_cp = self.grad_c[{{}, unpack(preCoor)}] -- N * H
-    
-    -- if there's no gradient in a predecessor, we overwrite it with a back propagated gradient,
-    -- otherwise we accumulate the back propagated gradient
-    local isGrad = true
-    if gradIndicator[preCoor] == 0 then -- no gradient in a predecessor
-      isGrad = false
-      gradIndicator[preCoor] = 1 
-    end
-
-    table.insert(grad_hps, grad_hp)
-    table.insert(grad_cps, grad_cp)
-    table.insert(isGrads, isGrad)
-  end
-
-  return grad_hps, grad_cps, isGrads
-end
-
-
 function hidden:DropoutForward(input, noise)
   local p = 1 - self.dropout
   if self.train then
@@ -424,24 +342,24 @@ end
 
 
 function hidden:SoftmaxForward(input)
-  local H, N = self.nodeSize, self.batchSize
-  assert(input:size(1) == N)
-  assert(input:size(2) == (self.hiddenDim + 1) * H)
+  local H = self.nodeSize
+  local D = self.hiddenDim
+  assert(input:size(2) == (D + 1) * H)
 
-  local a_max = self.buff1:copy(input:narrow(2, 1, H))
-  for i = 1, self.hiddenDim do
+  local a_max = self.buf_H_1:copy(input:narrow(2, 1, H))
+  for i = 1, D do
     local a = input:narrow(2, i * H + 1, H)
     a_max:cmax(a)
   end
 
-  local exp_sum = self.buff2:zero()
-  for i = 0, self.hiddenDim do
+  local exp_sum = self.buf_H_2:zero()
+  for i = 0, D do
     local a = input:narrow(2, i * H + 1, H)
     a:add(-1, a_max):exp()
     exp_sum:add(a)
   end
 
-  for i = 0, self.hiddenDim do
+  for i = 0, D do
     local a = input:narrow(2, i * H + 1, H)
     a:cdiv(exp_sum)
   end
@@ -449,21 +367,20 @@ end
 
 
 function hidden:SoftmaxBackward(output, gradOutput)
-  local H, N = self.nodeSize, self.batchSize
-  assert(output:size(1) == N)
-  assert(output:size(2) == (self.hiddenDim + 1) * H)
-  assert(gradOutput:size(1) == output:size(1))
+  local H = self.nodeSize
+  local D = self.hiddenDim
+  assert(output:size(2) == (D + 1) * H)
   assert(gradOutput:size(2) == output:size(2))
 
-  local product_sum = self.buff1:zero()
-  for i = 0, self.hiddenDim do
+  local product_sum = self.buf_H_1:zero()
+  for i = 0, D do
     local output_every = output:narrow(2, i * H + 1, H)
     local gradOutput_every = gradOutput:narrow(2, i * H + 1, H)
     gradOutput_every:cmul(output_every)
     product_sum:add(gradOutput_every)
   end
 
-  for i = 0, self.hiddenDim do
+  for i = 0, D do
     local output_every = output:narrow(2, i * H + 1, H)
     local gradOutput_every = gradOutput:narrow(2, i * H + 1, H)
     gradOutput_every:addcmul(-1, output_every, product_sum)
@@ -478,83 +395,156 @@ function hidden:updateOutput(input)
   self.isReturnGradH0 = (h0 ~= nil)
   self.isReturnGradC0 = (c0 ~= nil)
   self:InitState(x)
-  local h, c = self.h, self.c
-  local H, N = self.nodeSize, self.batchSize
-  local buff1 = self.buff1
 
+  self:SetInitialStates(h0, c0)
+  self:SetInput(x)
+  
+  self:SkewBlock(self.states)
+  self:UpdateStates()
+  
+  self:GetOutput() -- self.output, don't binding it
+
+  return self.output
+end
+
+
+function hidden:SetInitialStates(h0, c0)
+  local H = self.nodeSize
+
+  -- if using the previous states, we should skew back the block to easily extract the last state from previous batch
+  if self.remember_states then
+    self:RecoverBlock(self.states)
+  end
+
+  -- extract h0 and c0 from input or previous states
   if h0 then
     self.h0 = h0:clone()
   else
-    h0 = self.h0
-    local h0_ = h:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
-    if h0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-      h0:resizeAs(h0_):zero()
-    else -- if remember, use the previous evaluated h as h0
-      assert(x:size(1) == self.batchSize, 'batch sizes must be the same to remember states')
-      h0:copy(h0_)
+    -- the last slice on the first input dimension (notice the batch dimension and the augmented layer)
+    local h0_ = self._h:select(2, self.inputShape[1] + 1):narrow(self._h:dim() - 1, 1, H) -- choose the states of the first input dimension
+    if self.h0:nElement() == 0 or not self.remember_states then
+      self.h0:resizeAs(h0_):zero()
+    else
+      self.h0:copy(h0_)
     end
   end
-
   if c0 then
     self.c0 = c0:clone()
   else
-    c0 = self.c0
-    local c0_ = c:select(1 + self.inputDim, self.inputShape[self.inputDim]) -- the last slice on the last input dimension
-    if c0:nElement() == 0 or not self.remember_states then -- first run or don't remember
-      c0:resizeAs(c0_):zero()
-    else -- if remember, use the previous evaluated c as c0
-      assert(x:size(1) == self.batchSize, 'batch sizes must be the same to remember states')
-      c0:copy(c0_)
+    -- the last slice on the first input dimension (notice the batch dimension and the augmented layer)
+    local c0_ = self._c:select(2, self.inputShape[1] + 1):narrow(self._c:dim() - 1, 1, H) -- choose the states of the first input dimension
+    if self.c0:nElement() == 0 or not self.remember_states then
+      self.c0:resizeAs(c0_):zero()
+    else
+      self.c0:copy(c0_)
     end
   end
-  
-  local gNum = self.gateNum
-  local bias_expand = self.bias:view(1, gNum * H):expand(N, gNum * H) -- copy the bias for a batch
 
-  -- initialize the coordinate of current node
-  local coor = {}
-  for i = 1, self.hiddenDim do
-    coor[i] = 1
-  end
+  -- put h0 and c0 on current states
+  self.states:zero()
+  self._h0:copy(self.h0)
+  self._c0:copy(self.c0)
+end
 
-  for nodeId = 1, self.nodeNum do
 
-    -- get the predecessor states
-    local hs, cs, noises, h_dps = self:GetPredecessorState(x, coor)
+function hidden:SetInput(input)
+  local H = self.nodeSize
+  local input_h = input:narrow(input:dim(), 1, H)
+  local input_c = input:narrow(input:dim(), H + 1, H)
 
-    -- update the current node
-    local hn = h[{{}, unpack(coor)}]
-    local cn = c[{{}, unpack(coor)}]
-    local curGates = self.gates[{{}, unpack(coor)}] -- N * (gNum * H)
-    curGates:copy(bias_expand) -- b
-    for i = 1, self.hiddenDim do
-      local wi = self.weight[{{i * H - H + 1, i * H}}] -- weights for hi
-      local hi = hs[i]
-      if self.dropout and i > self.inputDim then
-        local idx = i - self.inputDim
-        hi = h_dps[idx]:copy(hi)
-        self:DropoutForward(hi, noises[idx])
-      end
-      curGates:addmm(hi, wi) -- sum(wi * hi) + b
+  self._input_h:copy(input_h)
+  self._input_c:copy(input_c)
+end
+
+
+function hidden:SkewBlock(t)
+  local L = t:size(2)
+
+  for d = 2, self.hiddenDim do
+    for i = 2, self.hiddenShape[d] do
+      local slice = t:select(1 + d, i) -- the i-th slice along the d-th dimension (take account the batch dimension so +1)
+      local slice_cp = slice[{{}, {1, L - i + 1}}]:clone()
+      slice:zero()
+      slice[{{}, {i, L}}]:copy(slice_cp)
     end
-    local g = curGates:narrow(2, 1, H):tanh() -- new content
-    local o = curGates:narrow(2, H + 1, H):sigmoid() -- output gate
-    local i_f = curGates:narrow(2, 2 * H + 1, (gNum - 2) * H) -- input gate and forget gates
+  end
+end
+
+
+function hidden:RecoverBlock(t)
+  local L = t:size(2)
+
+  for d = 2, self.hiddenDim do
+    for i = 2, self.hiddenShape[d] do
+      local slice = t:select(1 + d, i) -- the i-th slice along the d-th dimension (take account the batch dimension so +1)
+      local slice_cp = slice[{{}, {i, L}}]:clone()
+      slice:zero()
+      slice[{{}, {1, L - i + 1}}]:copy(slice_cp)
+    end
+  end
+end
+
+
+function hidden:UpdateStates()
+  local H = self.nodeSize
+  local D = self.hiddenDim
+  local G = self.gateNum
+  local L = self.states:size(2)
+
+  local buf_H_1 = self.buf_H_1:view(-1, H)
+  local buf_H_2 = self.buf_H_2:view(-1, H)
+  local buf_DH_1 = self.buf_DH_1:view(-1, D * H)
+  local buf_2DH_1 = self.buf_2DH_1
+  local buf_GH_1 = self.buf_GH_1
+  local bias_expand = self.bias:view(1, G * H):expand(buf_H_1:size(1), G * H)
+
+  for l = 2, L do
+    -- extract predecessor states for current layer
+    buf_2DH_1:copy(self.states:select(2, l - 1)) -- a slice along the fisrt input dimension
+    local s_prev_all = buf_2DH_1:view(-1, 2 * D * H)
+    local h_prev_all = s_prev_all:narrow(2, 1, D * H)
+    local c_prev_all = s_prev_all:narrow(2, D * H + 1, D * H)
+
+    -- update gates
+    buf_GH_1:copy(self.gates:select(2, l))
+    local gates = buf_GH_1:view(-1, G * H)
+    gates:addmm(bias_expand, h_prev_all, self.weight)
+    local g = gates:narrow(2, 1, H):tanh() -- new content
+    local o = gates:narrow(2, H + 1, H):sigmoid() -- output gate
+    local i_f = gates:narrow(2, 2 * H + 1, (G - 2) * H) -- input gate and forget gates
     self:SoftmaxForward(i_f)
     local i = i_f:narrow(2, 1, H) -- input gate
-    hn:cmul(i, g) -- gated new content
-    cn:copy(hn)
-    for i = 1, self.hiddenDim do
-      local f = i_f:narrow(2, i * H + 1, H) -- forget gate
-      cn:addcmul(f, cs[i]) -- accumulate to new memory
+    local f = i_f:narrow(2, H + 1, D * H) -- forget gates
+
+    -- update current states
+    local c_mem_all = buf_DH_1:cmul(f, c_prev_all):view(-1, D, H)
+    local c_mem = buf_H_1:view(-1, 1, H):sum(c_mem_all, 2):view(-1, H)
+    local c_new_ = buf_H_2:cmul(i, g):add(c_mem) -- new memory cells
+    local h_new = buf_H_1:tanh(c_new_):cmul(o):viewAs(self.buf_H_1) -- new hidden states
+    local c_new = c_new_:viewAs(self.buf_H_1)
+
+    -- prepare predecessor states for the next layer
+    local s_cur_all = self.states:select(2, l) -- a slice along the fisrt input dimension
+    local h_cur_all = s_cur_all:narrow(s_cur_all:dim(), 1, D * H)
+    local c_cur_all = s_cur_all:narrow(s_cur_all:dim(), D * H + 1, D * H)
+    for d = 1, D do
+      local h_cur_d = h_cur_all:narrow(h_cur_all:dim(), (d - 1) * H + 1, H) -- h of the d-th dimension
+      local c_cur_d = c_cur_all:narrow(c_cur_all:dim(), (d - 1) * H + 1, H) -- c of the d-th dimension
+      if d == 1 then
+        h_cur_d:add(h_new) -- use add to avoid overwriting h0
+        c_cur_d:add(c_new)
+      else
+        local len = h_cur_d:size(d)
+        h_cur_d:narrow(d, 2, len - 1):copy(h_new:narrow(d, 1, len - 1))
+        c_cur_d:narrow(d, 2, len - 1):copy(c_new:narrow(d, 1, len - 1))
+      end
     end
-    hn:tanh(cn):cmul(o) -- output
-
-    self:MoveCoor(coor, 1)
   end
+end
 
-  self.output = self._output:contiguous()
-  return self.output
+
+function hidden:GetOutput() -- operated on skewed block
+  self.output = torch.cat(self._output_h, self._output_c, self.inputDim + 2)
 end
 
 
@@ -563,112 +553,19 @@ function hidden:backward(input, gradOutput, scale)
   self.recompute_backward = false
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x, gradOutput)
-  self.gradOutput:copy(gradOutput)
   scale = scale or 1.0
   assert(scale == 1.0, 'must have scale=1')
 
-  local h, c = self.h, self.c
-  local grad_h, grad_c = self.grad_h, self.grad_c
-  if not c0 then c0 = self.c0 end
-  if not h0 then h0 = self.h0 end
+  self:SetGradOutput(gradOutput)
 
-  local H, N = self.nodeSize, self.batchSize
-  local grad_b = self.gradBias
-  local grad_b_sum = self.grad_b_sum
-  local gradIndicator = self.gradIndicator:clone()
-  local buff1 = self.buff1
+  self:UpdateGrads()
 
-  -- initialize the coordinate of current node
-  local coor = {}
-  for i = 1, self.hiddenDim do
-    coor[i] = self.hiddenShape[i]
+  self:GetGradInput()
+
+  if self.isReturnGradH0 or self.isReturnGradC0 then
+    self:GetGradInitialStates()
   end
 
-  for nodeId = self.nodeNum, 1, -1 do
-    -- get the predecessor states
-    local hs, cs, noises, h_dps = self:GetPredecessorState(x, coor)
-    -- get the predecessor gradients
-    local grad_hs, grad_cs, isGrads = self:GetPredecessorGrad(coor, gradIndicator)
-    
-    -- back propagate the gradients to predecessors
-    local hn = h[{{}, unpack(coor)}] -- N * H
-    local cn = c[{{}, unpack(coor)}] -- N * H
-    local coorg = {}
-    for i, v in ipairs(coor) do
-      coorg[i] = v + 1
-    end
-    local grad_hn = grad_h[{{}, unpack(coorg)}] -- N * H
-    local grad_cn = grad_c[{{}, unpack(coorg)}] -- N * H
-    local curGates = self.gates[{{}, unpack(coor)}] -- N * (gNum * H)
-    local g = curGates:narrow(2, 1, H)
-    local o = curGates:narrow(2, H + 1, H)
-    local i = curGates:narrow(2, 2 * H + 1, H)
-    local i_f = curGates:narrow(2, 2 * H + 1, (self.gateNum - 2) * H) -- input gate and forget gates
-
-    local grad_a = self.grad_a:zero() -- gradients of activations
-    local grad_ag  = grad_a:narrow(2, 1, H)
-    local grad_ao = grad_a:narrow(2, H + 1, H)
-    local grad_aif = grad_a:narrow(2, 2 * H + 1, (self.gateNum - 2) * H)
-
-    local tanh_next_c = buff1:tanh(cn)
-    local tanh_next_c2 = grad_ao:cmul(tanh_next_c, tanh_next_c)
-    local my_grad_cn = grad_ag
-    my_grad_cn:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_hn)
-    grad_cn:add(my_grad_cn) -- accumulate the gradient of cell from current hidden state
-
-    -- gradients of ao and ag
-    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_hn)
-    local g2 = buff1:cmul(g, g)
-    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_cn)
-
-    -- gradients of ai and all af
-    for i = 0, self.hiddenDim do
-      local grad_aif_every = grad_aif:narrow(2, i * H + 1, H) -- the gradient at input gate (i == 0) or forget gate
-      local content = g -- new content (i == 0) or the i-th memory cell
-      if (i > 0) then 
-        content = cs[i]
-      end
-      grad_aif_every:cmul(content, grad_cn)
-    end
-    self:SoftmaxBackward(i_f, grad_aif)
-
-    -- gradients of parameters
-    for i = 1, self.hiddenDim do
-      local grad_wi = self.gradWeight[{{i * H - H + 1, i * H}}]
-      local hi = hs[i]
-      if self.dropout and i > self.inputDim then
-        hi = h_dps[i - self.inputDim]
-      end
-      grad_wi:addmm(scale, hi:t(), grad_a)
-    end
-    grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
-    grad_b:add(scale, grad_b_sum)
-
-    -- gradients of hidden states and memory cells
-    for i = 1, self.hiddenDim do
-      local wi = self.weight[{{i * H - H + 1, i * H}}] -- weights for hi
-      local f = curGates:narrow(2, (i + 2) * H + 1, H) -- forget gate
-
-      local grad_hi = buff1:mm(grad_a, wi:t())
-      if self.dropout and i > self.inputDim then
-        self:DropoutBackward(noises[i - self.inputDim], grad_hi)
-      end
-
-      if not isGrads[i] then -- if no previous gradient, we overwrite it
-        grad_hs[i]:copy(grad_hi)
-        grad_cs[i]:cmul(grad_cn, f)
-      else -- if previous gradient exists, we accumulate it
-        grad_hs[i]:add(grad_hi)
-        grad_cs[i]:addcmul(grad_cn, f)
-      end
-    end
-    
-    self:MoveCoor(coor, -1)
-  end
-
-  self.grad_x = self._grad_x:contiguous()
-  self.grad_h0 = self._grad_h0:contiguous()
-  self.grad_c0 = self._grad_c0:contiguous()
   if self.isReturnGradH0 and self.isReturnGradC0 then
     self.gradInput = {self.grad_x, self.grad_h0, self.grad_c0}
   elseif self.isReturnGradH0 then
@@ -678,7 +575,153 @@ function hidden:backward(input, gradOutput, scale)
   end
 
   return self.gradInput
+
 end
+
+
+function hidden:SetGradOutput(gradOutput)
+  local H = self.nodeSize
+  local gradOutput_h = gradOutput:narrow(gradOutput:dim(), 1, H)
+  local gradOutput_c = gradOutput:narrow(gradOutput:dim(), H + 1, H)
+
+  self.grads:zero()
+  self._gradOutput_h:copy(gradOutput_h)
+  self._gradOutput_c:copy(gradOutput_c)
+end
+
+
+function hidden:UpdateGrads()
+  local H = self.nodeSize
+  local D = self.hiddenDim
+  local G = self.gateNum
+  local L = self.grads:size(2)
+
+  local buf_H_1 = self.buf_H_1:view(-1, H)
+  local buf_H_2 = self.buf_H_2:view(-1, H)
+  local buf_H_3 = self.buf_H_3:view(-1, H)
+  local buf_DH_1 = self.buf_DH_1:view(-1, D * H)
+  local buf_DH_2 = self.buf_DH_2:view(-1, D * H)
+  local buf_2DH_1 = self.buf_2DH_1
+  local buf_2DH_2 = self.buf_2DH_2
+  local buf_GH_1 = self.buf_GH_1
+  local buf_GH_2 = self.buf_GH_2:view(-1, G * H)
+
+  for l = L, 2 do
+    -- extract states of previous layer
+    buf_2DH_1:copy(self.states:select(2, l - 1)) -- a slice along the fisrt input dimension
+    local s_prev_all = buf_2DH_1:view(-1, 2 * D * H)
+    local h_prev_all = s_prev_all:narrow(2, 1, D * H)
+    local c_prev_all = s_prev_all:narrow(2, D * H + 1, D * H)
+
+    -- extract gradients of current layer (unsummed gradients from all directions)
+    buf_2DH_2:copy(self.grads:select(2, l)) -- a slice along the fisrt input dimension
+    local grad_s_cur_all = buf_2DH_2:view(-1, 2 * D * H)
+    local grad_h_cur_all = grad_s_cur_all:narrow(2, 1, D * H)
+    local grad_c_cur_all = grad_s_cur_all:narrow(2, D * H + 1, D * H)
+
+    -- sum the gradients from all directions
+    local grad_h_cur_all_ = grad_h_cur_all:view(-1, D, H)
+    local grad_h_cur = buf_H_1:view(-1, 1, H):sum(grad_h_cur_all_, 2):view(-1, H)
+    local grad_c_cur_all_ = grad_c_cur_all:view(-1, D, H)
+    local grad_c_cur = buf_H_2:view(-1, 1, H):sum(grad_c_cur_all_, 2):view(-1, H)
+
+    -- extract gates of current layer
+    buf_GH_1:copy(self.gates:select(2, l))
+    local gates = buf_GH_1:view(-1, G * H)
+    local g = gates:narrow(2, 1, H)
+    local o = gates:narrow(2, H + 1, H)
+    local i = gates:narrow(2, 2 * H + 1, H)
+    local f = gates:narrow(2, 3 * H + 1, D * H)
+    local i_f = gates:narrow(2, 2 * H + 1, (G - 2) * H)
+
+    -- gradients of gate activations
+    local grad_a = buf_GH_2:zero() -- gradients of activations
+    local grad_ag  = grad_a:narrow(2, 1, H)
+    local grad_ao = grad_a:narrow(2, H + 1, H)
+    local grad_ai = grad_a:narrow(2, 2 * H + 1, H)
+    local grad_af = grad_a:narrow(2, 3 * H + 1, D * H)
+    local grad_aif = grad_a:narrow(2, 2 * H + 1, (G - 2) * H)
+
+    buf_2DH_2:copy(self.states:select(2, l)) -- a slice along the fisrt input dimension
+    local s_cur_all = buf_2DH_2:view(-1, 2 * D * H) -- current states
+    local c_cur = s_cur_all:narrow(2, D * H + 1, D * H + H) -- current c
+    local tanh_next_c = buf_H_3:tanh(c_cur)
+    local tanh_next_c2 = grad_ao:cmul(tanh_next_c, tanh_next_c)
+    local grad_from_h = grad_ag
+    grad_from_h:fill(1):add(-1, tanh_next_c2):cmul(o):cmul(grad_h_cur)
+    grad_c_cur:add(grad_from_h) -- accumulate the gradient of cell from current hidden state
+
+    -- gradients of ao, ag, ai, af
+    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_h_cur)
+    local g2 = buf_H_3:cmul(g, g)
+    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_c_cur)
+    grad_ai:cmul(g, grad_c_cur)
+    for i = 1, D do
+      grad_af:narrow(2, (i - 1) * H + 1, H):copy(grad_c_cur)
+    end
+    grad_af:cmul(c_prev_all)
+    self:SoftmaxBackward(i_f, grad_aif)
+
+    -- gradients of parameters
+    self.gradWeight:addmm(scale, h_prev_all:t(), grad_a)
+    self.grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
+    self.gradBias:add(scale, self.grad_b_sum)
+
+    -- gradients of previous hidden states and memory cells (for all the direction)
+    grad_h_prev_all_new = buf_DH_1:mm(grad_a, self.weight:t())
+    for i = 1, D do
+      grad_c_prev_all_new = buf_DH_2:narrow(2, (i - 1) * H + 1, H):copy(grad_c_cur)
+    end
+    grad_c_prev_all_new:cmul(f)
+
+    -- extract gradients of previous layer
+    local grad_s_prev_all = self.grads:select(2, l - 1) -- a slice along the fisrt input dimension
+    local S = grad_s_prev_all:dim()
+    local grad_h_prev_all = grad_s_prev_all:narrow(S, 1, D * H)
+    local grad_c_prev_all = grad_s_prev_all:narrow(S, D * H + 1, D * H)
+
+    -- propagate the gradients to previous layer (align the gradients)
+    for d = 1, D do
+      -- extract gradients in each direction
+      local grad_h_prev_d_new = grad_h_prev_all_new:narrow(2, (d - 1) * H + 1, H):viewAs(self.buf_H_1)
+      local grad_c_prev_d_new = grad_c_prev_all_new:narrow(2, (d - 1) * H + 1, H):viewAs(self.buf_H_1)
+      local grad_h_prev_d = grad_h_prev_all:narrow(S, (d - 1) * H + 1, H)
+      local grad_c_prev_d = grad_c_prev_all:narrow(S, (d - 1) * H + 1, H)
+      -- shift the gradients' position along each direction 
+      if d == 1 then
+        grad_h_prev_d:copy(grad_h_prev_d_new)
+        grad_c_prev_d:copy(grad_c_prev_d_new)
+      else
+        local len = grad_h_prev_d:size(d)
+        grad_h_prev_d:narrow(d, 1, len - 1):copy(grad_h_prev_d_new:narrow(d, 2, len - 1))
+        grad_c_prev_d:narrow(d, 1, len - 1):copy(grad_c_prev_d_new:narrow(d, 2, len - 1))
+      end
+    end
+
+  end
+
+end
+
+
+function hidden:GetGradInput()
+  self.grad_x = torch.cat(self._gradInput_h, self._gradInput_c, self.inputDim + 2)
+end
+
+
+function hidden:GetGradInitialStates()
+  self:RecoverBlock(self.grads)
+  self.grad_h0 = self._grad_h0:clone()
+  self.grad_c0 = self._grad_c0:clone()
+end
+
+
+
+
+
+
+
+
+
 
 
 function hidden:updateGradInput(input, gradOutput)
