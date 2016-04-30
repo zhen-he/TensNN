@@ -1,6 +1,6 @@
 require 'torch'
 require 'nn'
-
+require 'cutorch'
 
 local hidden, parent = torch.class('nn.TensHidden', 'nn.Module')
 
@@ -36,15 +36,19 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
   self.buf_H_3 = torch.Tensor()
   self.buf_DH_1 = torch.Tensor()
   self.buf_DH_2 = torch.Tensor()
-  self.buf_2DH_1 = torch.Tensor()
+  self.buf_D1H_1 = torch.Tensor() -- (D + 1) * H
+  self.buf_2DH_1 = torch.Tensor() -- 2 * D * H
   self.buf_2DH_2 = torch.Tensor()
-  self.buf_GH_1 = torch.Tensor()
+  self.buf_GH_1 = torch.Tensor() -- G * H
   self.buf_GH_2 = torch.Tensor()
+  self.buf_GH_3 = torch.Tensor()
 
   self.states = torch.Tensor()
   self.grads = torch.Tensor()
 
   self.gates = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), gateNum * H)
+  self.skewMask = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), H)
+  self.initialStateMask = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), H)
   self.grad_b_sum = torch.Tensor() -- This will be (1, gateNum * H)
 
   self.noise = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), tensDim * H), for drop out
@@ -65,8 +69,7 @@ function hidden:reset(std)
   end
   self.weight:normal(0, std)
   self.bias:zero()
-  self.bias[{{3 * H + 1, self.gateNum * H}}]:fill(1) -- set the bias of forget gates to 1
-
+  -- self.bias[{{3 * H + 1, self.gateNum * H}}]:fill(1) -- set the bias of forget gates to 1
   return self
 end
 
@@ -124,7 +127,7 @@ function hidden:InitState(input)
     end
     assert(self.hiddenDim == #self.hiddenShape, 'the dimension of of input mismatched with inputShape')
     self.hiddenShape[1] = l - self.hiddenDim + 2
-  end
+  end 
 
   -- initialize the network states
   local N = self.batchSize
@@ -144,7 +147,14 @@ function hidden:InitState(input)
     end
     table.insert(sz, 2 * D * H)
     self.states:resize(torch.LongStorage(sz)):zero()
+    sz[#sz - 1] = sz[#sz - 1] + 1 -- an adition size along the last tensorized dimension, for the gradients of input
     self.grads:resize(torch.LongStorage(sz)):zero()
+    sz[#sz - 1] = sz[#sz - 1] - 1
+    sz[#sz] = G * H
+    self.gates:resize(torch.LongStorage(sz)):zero()
+    sz[#sz] = H
+    self.skewMask:resize(torch.LongStorage(sz)):zero()
+    self.initialStateMask:resize(torch.LongStorage(sz)):zero()
 
     -- define variables (with '_') sharing memory with states or grads
     self._h = self.states:narrow(S, 1, D * H)
@@ -163,6 +173,10 @@ function hidden:InitState(input)
     table.insert(initialState_region, {1, H})-- states of the first input dimension
     self._h0 = self._h[initialState_region]
     self._c0 = self._c[initialState_region]
+    -- initialize the mask
+    self.initialStateMask[initialState_region]:fill(1)
+    self:SkewBlock(self.initialStateMask)
+    initialState_region[D + 1] = {2, self.hiddenShape[D] + 1}
     self._grad_h0 = self._grad_h[initialState_region]
     self._grad_c0 = self._grad_c[initialState_region]
 
@@ -176,7 +190,7 @@ function hidden:InitState(input)
         table.insert(input_region, 1) -- first slice on the tensorized dimensions
       end
     end
-    table.insert(input_region, {(D - 1) * H + 1, D * H})-- states of the last tensorized dimension
+    table.insert(input_region, {(D - 1) * H + 1, D * H}) -- states of the last tensorized dimension
     self._input_h = self._h[input_region]
     self._input_c = self._c[input_region]
     self._gradInput_h = self._grad_h[input_region]
@@ -192,11 +206,16 @@ function hidden:InitState(input)
         table.insert(output_region, v) -- last slice on the tensorized dimensions
       end
     end
-    table.insert(output_region, {(D - 1) * H + 1, D * H})-- states of the last tensorized dimension
+    table.insert(output_region, {1, H})-- states of the first input dimension
     self._output_h = self._h[output_region]
     self._output_c = self._c[output_region]
+    output_region[D + 1] = self.hiddenShape[D] + 1
+    output_region[D + 2] = {(D - 1) * H + 1, D * H} -- gradients of the last tensorized dimension
     self._gradOutput_h = self._grad_h[output_region]
     self._gradOutput_c = self._grad_c[output_region]
+
+    self.skewMask:narrow(2, 2, self.inputShape[1]):fill(1)
+    self:SkewBlock(self.skewMask)
 
     -- layer buffers
     table.remove(sz, 2) -- a slice along the first input dimension
@@ -207,21 +226,15 @@ function hidden:InitState(input)
     sz[#sz] = D * H
     self.buf_DH_1:resize(torch.LongStorage(sz)):zero()
     self.buf_DH_2:resize(torch.LongStorage(sz)):zero()
+    sz[#sz] = (D + 1) * H
+    self.buf_D1H_1:resize(torch.LongStorage(sz)):zero()
     sz[#sz] = 2 * D * H
     self.buf_2DH_1:resize(torch.LongStorage(sz)):zero()
     self.buf_2DH_2:resize(torch.LongStorage(sz)):zero()
     sz[#sz] = G * H
     self.buf_GH_1:resize(torch.LongStorage(sz)):zero()
     self.buf_GH_2:resize(torch.LongStorage(sz)):zero()
-  end
-
-  if self.gates:nElement() == 0 or isInputShapeChanged then
-    local sz = {N}
-    for _, v in ipairs(self.hiddenShape) do
-      table.insert(sz, v)
-    end
-    table.insert(sz, G * H)
-    self.gates:resize(torch.LongStorage(sz)):zero()
+    self.buf_GH_3:resize(torch.LongStorage(sz)):zero()
   end
 
   if self.grad_b_sum:nElement() == 0 then
@@ -249,6 +262,8 @@ function hidden:clearState()
   -- network states
   self.states:set()
   self.gates:set()
+  self.initialStateMask:set()
+  self.skewMask:set()
   self.grads:set()
 
   -- shared variables
@@ -275,10 +290,12 @@ function hidden:clearState()
   self.buf_H_3:set()
   self.buf_DH_1:set()
   self.buf_DH_2:set()
+  self.buf_D1H_1:set()
   self.buf_2DH_1:set()
   self.buf_2DH_2:set()
   self.buf_GH_1:set()
   self.buf_GH_2:set()
+  self.buf_GH_3:set()
   self.grad_b_sum:set()
 
   -- module interfaces
@@ -394,16 +411,18 @@ function hidden:updateOutput(input)
   self:CheckSize(x)
   self.isReturnGradH0 = (h0 ~= nil)
   self.isReturnGradC0 = (c0 ~= nil)
+timer = torch.Timer()
   self:InitState(x)
-
+print('\nA: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   self:SetInitialStates(h0, c0)
+print('\nB: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   self:SetInput(x)
-  
-  self:SkewBlock(self.states)
+print('\nC: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   self:UpdateStates()
-  
-  self:GetOutput() -- self.output, don't binding it
+print('\nD: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
 
+  self:GetOutput()
+print('\nE: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   return self.output
 end
 
@@ -444,6 +463,8 @@ function hidden:SetInitialStates(h0, c0)
   self.states:zero()
   self._h0:copy(self.h0)
   self._c0:copy(self.c0)
+
+  self:SkewBlock(self.states)
 end
 
 
@@ -459,7 +480,6 @@ end
 
 function hidden:SkewBlock(t)
   local L = t:size(2)
-
   for d = 2, self.hiddenDim do
     for i = 2, self.hiddenShape[d] do
       local slice = t:select(1 + d, i) -- the i-th slice along the d-th dimension (take account the batch dimension so +1)
@@ -473,7 +493,6 @@ end
 
 function hidden:RecoverBlock(t)
   local L = t:size(2)
-
   for d = 2, self.hiddenDim do
     for i = 2, self.hiddenShape[d] do
       local slice = t:select(1 + d, i) -- the i-th slice along the d-th dimension (take account the batch dimension so +1)
@@ -493,28 +512,28 @@ function hidden:UpdateStates()
 
   local buf_H_1 = self.buf_H_1:view(-1, H)
   local buf_H_2 = self.buf_H_2:view(-1, H)
+  local buf_H_3 = self.buf_H_3
   local buf_DH_1 = self.buf_DH_1:view(-1, D * H)
   local buf_2DH_1 = self.buf_2DH_1
+  local buf_2DH_2 = self.buf_2DH_2
   local buf_GH_1 = self.buf_GH_1
   local bias_expand = self.bias:view(1, G * H):expand(buf_H_1:size(1), G * H)
 
   for l = 2, L do
     -- extract predecessor states for current layer
-    buf_2DH_1:copy(self.states:select(2, l - 1)) -- a slice along the fisrt input dimension
-    local s_prev_all = buf_2DH_1:view(-1, 2 * D * H)
+    local s_prev_all = buf_2DH_1:copy(self.states:select(2, l - 1)):view(-1, 2 * D * H) -- a slice along the fisrt input dimension
     local h_prev_all = s_prev_all:narrow(2, 1, D * H)
     local c_prev_all = s_prev_all:narrow(2, D * H + 1, D * H)
 
     -- update gates
-    buf_GH_1:copy(self.gates:select(2, l))
-    local gates = buf_GH_1:view(-1, G * H)
+    local gates = buf_GH_1:copy(self.gates:select(2, l)):view(-1, G * H)
     gates:addmm(bias_expand, h_prev_all, self.weight)
     local g = gates:narrow(2, 1, H):tanh() -- new content
-    local o = gates:narrow(2, H + 1, H):sigmoid() -- output gate
-    local i_f = gates:narrow(2, 2 * H + 1, (G - 2) * H) -- input gate and forget gates
-    self:SoftmaxForward(i_f)
-    local i = i_f:narrow(2, 1, H) -- input gate
-    local f = i_f:narrow(2, H + 1, D * H) -- forget gates
+    local o = gates:narrow(2, H + 1, H) -- output gate
+    local i = gates:narrow(2, 2 * H + 1, H) -- input gate
+    local f = gates:narrow(2, 3 * H + 1, D * H) -- forget gates
+    gates:narrow(2, H + 1, (D + 2) * H):sigmoid()
+    self.gates:select(2, l):copy(buf_GH_1) -- save the gate values for backward
 
     -- update current states
     local c_mem_all = buf_DH_1:cmul(f, c_prev_all):view(-1, D, H)
@@ -524,22 +543,35 @@ function hidden:UpdateStates()
     local c_new = c_new_:viewAs(self.buf_H_1)
 
     -- prepare predecessor states for the next layer
-    local s_cur_all = self.states:select(2, l) -- a slice along the fisrt input dimension
+    local s_cur_all = buf_2DH_1:copy(self.states:select(2, l)) -- a slice along the fisrt input dimension
     local h_cur_all = s_cur_all:narrow(s_cur_all:dim(), 1, D * H)
     local c_cur_all = s_cur_all:narrow(s_cur_all:dim(), D * H + 1, D * H)
     for d = 1, D do
       local h_cur_d = h_cur_all:narrow(h_cur_all:dim(), (d - 1) * H + 1, H) -- h of the d-th dimension
       local c_cur_d = c_cur_all:narrow(c_cur_all:dim(), (d - 1) * H + 1, H) -- c of the d-th dimension
       if d == 1 then
-        h_cur_d:add(h_new) -- use add to avoid overwriting h0
-        c_cur_d:add(c_new)
+        h_cur_d:copy(h_new)
+        c_cur_d:copy(c_new)
       else
         local len = h_cur_d:size(d)
-        h_cur_d:narrow(d, 2, len - 1):copy(h_new:narrow(d, 1, len - 1))
-        c_cur_d:narrow(d, 2, len - 1):copy(c_new:narrow(d, 1, len - 1))
+        if len > 1 then
+          h_cur_d:narrow(d, 2, len - 1):copy(h_new:narrow(d, 1, len - 1))
+          c_cur_d:narrow(d, 2, len - 1):copy(c_new:narrow(d, 1, len - 1))
+        end
       end
     end
+
+     -- for the node where initial state exists, we block the updated state for the first input dimension and use the original one
+    local mask_1 = buf_H_3:copy(self.initialStateMask:select(2, l)) -- initial state mask for the first input dimension
+    local mask_all = buf_2DH_2:zero() -- initial state mask for all directions of h and c
+    mask_all:narrow(mask_all:dim(), 1, H):copy(mask_1)
+    mask_all:narrow(mask_all:dim(), D * H + 1, H):copy(mask_1)
+    local s_cur_all_res = self.states:select(2, l):cmul(mask_all) -- the reserved initial states
+    local s_cur_all_new = mask_all:mul(-1):add(1):cmul(s_cur_all) -- the filtered new states
+    local s_cur_all_final = s_cur_all_res:add(s_cur_all_new)
+
   end
+
 end
 
 
@@ -553,12 +585,10 @@ function hidden:backward(input, gradOutput, scale)
   self.recompute_backward = false
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x, gradOutput)
-  scale = scale or 1.0
-  assert(scale == 1.0, 'must have scale=1')
 
   self:SetGradOutput(gradOutput)
 
-  self:UpdateGrads()
+  self:UpdateGrads(scale)
 
   self:GetGradInput()
 
@@ -590,9 +620,12 @@ function hidden:SetGradOutput(gradOutput)
 end
 
 
-function hidden:UpdateGrads()
+function hidden:UpdateGrads(scale)
+  scale = scale or 1.0
+  assert(scale == 1.0, 'must have scale=1')
   local H = self.nodeSize
   local D = self.hiddenDim
+  local T = self.hiddenShape[self.hiddenDim]
   local G = self.gateNum
   local L = self.grads:size(2)
 
@@ -601,50 +634,50 @@ function hidden:UpdateGrads()
   local buf_H_3 = self.buf_H_3:view(-1, H)
   local buf_DH_1 = self.buf_DH_1:view(-1, D * H)
   local buf_DH_2 = self.buf_DH_2:view(-1, D * H)
+  local buf_D1H_1 = self.buf_D1H_1:view(-1, (D + 1) * H)
   local buf_2DH_1 = self.buf_2DH_1
   local buf_2DH_2 = self.buf_2DH_2
   local buf_GH_1 = self.buf_GH_1
   local buf_GH_2 = self.buf_GH_2:view(-1, G * H)
+  local buf_GH_3 = self.buf_GH_3:view(-1, G * H)
 
-  for l = L, 2 do
+  for l = L, 2, -1 do
     -- extract states of previous layer
-    buf_2DH_1:copy(self.states:select(2, l - 1)) -- a slice along the fisrt input dimension
-    local s_prev_all = buf_2DH_1:view(-1, 2 * D * H)
+    local s_prev_all = buf_2DH_1:copy(self.states:select(2, l - 1)):view(-1, 2 * D * H) -- a slice along the fisrt input dimension
     local h_prev_all = s_prev_all:narrow(2, 1, D * H)
     local c_prev_all = s_prev_all:narrow(2, D * H + 1, D * H)
 
     -- extract gradients of current layer (unsummed gradients from all directions)
-    buf_2DH_2:copy(self.grads:select(2, l)) -- a slice along the fisrt input dimension
-    local grad_s_cur_all = buf_2DH_2:view(-1, 2 * D * H)
+    local grads_ = self.grads:narrow(D + 1, 2, T) -- gradients without the input gradients
+    local grad_s_cur_all = buf_2DH_2:copy(grads_:select(2, l)):view(-1, 2 * D * H)
     local grad_h_cur_all = grad_s_cur_all:narrow(2, 1, D * H)
     local grad_c_cur_all = grad_s_cur_all:narrow(2, D * H + 1, D * H)
 
     -- sum the gradients from all directions
-    local grad_h_cur_all_ = grad_h_cur_all:view(-1, D, H)
+    local grad_h_cur_all_ = buf_DH_1:copy(grad_h_cur_all):view(-1, D, H)
     local grad_h_cur = buf_H_1:view(-1, 1, H):sum(grad_h_cur_all_, 2):view(-1, H)
-    local grad_c_cur_all_ = grad_c_cur_all:view(-1, D, H)
+    local grad_c_cur_all_ = buf_DH_1:copy(grad_c_cur_all):view(-1, D, H)
     local grad_c_cur = buf_H_2:view(-1, 1, H):sum(grad_c_cur_all_, 2):view(-1, H)
 
     -- extract gates of current layer
-    buf_GH_1:copy(self.gates:select(2, l))
-    local gates = buf_GH_1:view(-1, G * H)
+    local gates = buf_GH_1:copy(self.gates:select(2, l)):view(-1, G * H)
     local g = gates:narrow(2, 1, H)
     local o = gates:narrow(2, H + 1, H)
     local i = gates:narrow(2, 2 * H + 1, H)
     local f = gates:narrow(2, 3 * H + 1, D * H)
-    local i_f = gates:narrow(2, 2 * H + 1, (G - 2) * H)
+    local o_i_f = gates:narrow(2, H + 1, (G - 1) * H)
 
     -- gradients of gate activations
     local grad_a = buf_GH_2:zero() -- gradients of activations
-    local grad_ag  = grad_a:narrow(2, 1, H)
+    local grad_ag = grad_a:narrow(2, 1, H)
     local grad_ao = grad_a:narrow(2, H + 1, H)
     local grad_ai = grad_a:narrow(2, 2 * H + 1, H)
     local grad_af = grad_a:narrow(2, 3 * H + 1, D * H)
     local grad_aif = grad_a:narrow(2, 2 * H + 1, (G - 2) * H)
+    local grad_aoif = grad_a:narrow(2, H + 1, (G - 1) * H)
 
-    buf_2DH_2:copy(self.states:select(2, l)) -- a slice along the fisrt input dimension
-    local s_cur_all = buf_2DH_2:view(-1, 2 * D * H) -- current states
-    local c_cur = s_cur_all:narrow(2, D * H + 1, D * H + H) -- current c
+    local s_cur_all = buf_2DH_2:copy(self.states:select(2, l)):view(-1, 2 * D * H) -- current states
+    local c_cur = s_cur_all:narrow(2, D * H + 1, H) -- current c
     local tanh_next_c = buf_H_3:tanh(c_cur)
     local tanh_next_c2 = grad_ao:cmul(tanh_next_c, tanh_next_c)
     local grad_from_h = grad_ag
@@ -652,15 +685,25 @@ function hidden:UpdateGrads()
     grad_c_cur:add(grad_from_h) -- accumulate the gradient of cell from current hidden state
 
     -- gradients of ao, ag, ai, af
-    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_h_cur)
+    grad_aoif:fill(1):add(-1, o_i_f):cmul(o_i_f)
+    grad_ao:cmul(tanh_next_c):cmul(grad_h_cur) -- grad ao
     local g2 = buf_H_3:cmul(g, g)
-    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_c_cur)
-    grad_ai:cmul(g, grad_c_cur)
-    for i = 1, D do
-      grad_af:narrow(2, (i - 1) * H + 1, H):copy(grad_c_cur)
+    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_c_cur) -- grad ag
+    local grad_c_cur_expand = buf_D1H_1
+    for d = 0, D do
+      grad_c_cur_expand:narrow(2, d * H + 1, H):copy(grad_c_cur)
     end
-    grad_af:cmul(c_prev_all)
-    self:SoftmaxBackward(i_f, grad_aif)
+    grad_aif:cmul(grad_c_cur_expand)
+    grad_ai:cmul(g) -- grad ai
+    grad_af:cmul(c_prev_all) -- grad af
+
+    -- set the activation gradients to zero in some skewed region where we don't want to accumulate the parametre gradients
+    local mask_d = self.buf_H_1:copy(self.skewMask:select(2, l)):view(-1, H) -- gradient mask for one gate activation
+    local mask_all = buf_GH_3:zero() -- gradient mask for all gate activations
+    for d = 1, G do
+      mask_all:narrow(2, (d - 1) * H + 1, H):copy(mask_d)
+    end
+    grad_a:cmul(mask_all)
 
     -- gradients of parameters
     self.gradWeight:addmm(scale, h_prev_all:t(), grad_a)
@@ -669,13 +712,14 @@ function hidden:UpdateGrads()
 
     -- gradients of previous hidden states and memory cells (for all the direction)
     grad_h_prev_all_new = buf_DH_1:mm(grad_a, self.weight:t())
-    for i = 1, D do
-      grad_c_prev_all_new = buf_DH_2:narrow(2, (i - 1) * H + 1, H):copy(grad_c_cur)
+    grad_c_prev_all_new = buf_DH_2
+    for d = 1, D do
+      grad_c_prev_all_new:narrow(2, (d - 1) * H + 1, H):copy(grad_c_cur)
     end
     grad_c_prev_all_new:cmul(f)
 
     -- extract gradients of previous layer
-    local grad_s_prev_all = self.grads:select(2, l - 1) -- a slice along the fisrt input dimension
+    local grad_s_prev_all = self.grads:select(2, l - 1) -- gradients including the input gradients
     local S = grad_s_prev_all:dim()
     local grad_h_prev_all = grad_s_prev_all:narrow(S, 1, D * H)
     local grad_c_prev_all = grad_s_prev_all:narrow(S, D * H + 1, D * H)
@@ -683,18 +727,23 @@ function hidden:UpdateGrads()
     -- propagate the gradients to previous layer (align the gradients)
     for d = 1, D do
       -- extract gradients in each direction
-      local grad_h_prev_d_new = grad_h_prev_all_new:narrow(2, (d - 1) * H + 1, H):viewAs(self.buf_H_1)
-      local grad_c_prev_d_new = grad_c_prev_all_new:narrow(2, (d - 1) * H + 1, H):viewAs(self.buf_H_1)
+      local grad_h_prev_d_new = buf_H_1:copy(grad_h_prev_all_new:narrow(2, (d - 1) * H + 1, H)):viewAs(self.buf_H_1)
+      local grad_c_prev_d_new = buf_H_2:copy(grad_c_prev_all_new:narrow(2, (d - 1) * H + 1, H)):viewAs(self.buf_H_1)
       local grad_h_prev_d = grad_h_prev_all:narrow(S, (d - 1) * H + 1, H)
       local grad_c_prev_d = grad_c_prev_all:narrow(S, (d - 1) * H + 1, H)
       -- shift the gradients' position along each direction 
-      if d == 1 then
-        grad_h_prev_d:copy(grad_h_prev_d_new)
-        grad_c_prev_d:copy(grad_c_prev_d_new)
-      else
+      if d == 1 then -- directly copy along the first input dimension
+        grad_h_prev_d:narrow(D, 2, T):copy(grad_h_prev_d_new)
+        grad_c_prev_d:narrow(D, 2, T):copy(grad_c_prev_d_new)
+      elseif d == D then -- shifted copy along the last tensorized dimension
+        grad_h_prev_d:narrow(D, 1, T):copy(grad_h_prev_d_new)
+        grad_c_prev_d:narrow(D, 1, T):copy(grad_c_prev_d_new)
+      else -- shifted copy along the other dimensions (the gradients will flow out)
         local len = grad_h_prev_d:size(d)
-        grad_h_prev_d:narrow(d, 1, len - 1):copy(grad_h_prev_d_new:narrow(d, 2, len - 1))
-        grad_c_prev_d:narrow(d, 1, len - 1):copy(grad_c_prev_d_new:narrow(d, 2, len - 1))
+        if len > 1 then
+          grad_h_prev_d:narrow(D, 2, T):narrow(d, 1, len - 1):copy(grad_h_prev_d_new:narrow(d, 2, len - 1))
+          grad_c_prev_d:narrow(D, 2, T):narrow(d, 1, len - 1):copy(grad_c_prev_d_new:narrow(d, 2, len - 1))
+        end
       end
     end
 
@@ -709,7 +758,10 @@ end
 
 
 function hidden:GetGradInitialStates()
-  self:RecoverBlock(self.grads)
+  local D = self.hiddenDim
+  local T = self.hiddenShape[self.hiddenDim]
+  local grads_ = self.grads:narrow(D + 1, 2, T) -- gradients without the input gradients
+  self:RecoverBlock(grads_)
   self.grad_h0 = self._grad_h0:clone()
   self.grad_c0 = self._grad_c0:clone()
 end
