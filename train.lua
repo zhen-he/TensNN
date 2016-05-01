@@ -18,9 +18,9 @@ cmd:option('-seq_length', 50)
 
 -- Model options
 cmd:option('-init_from', '')
-cmd:option('-rnn_size', 128)
-cmd:option('-inputShape', {1})
-cmd:option('-tensShape', {3,3})
+cmd:option('-rnn_size', 256)
+cmd:option('-inputShape', {100})
+cmd:option('-tensShape', {3})
 cmd:option('-dropout', false)
 
 -- Optimization options
@@ -36,8 +36,8 @@ cmd:option('-checkpoint_every', 1000)
 cmd:option('-result_dir', 'result/')
 
 -- Benchmark options
-cmd:option('-speed_benchmark', 0) -- record the time consuming
-cmd:option('-memory_benchmark', 0) -- record the memory usage
+cmd:option('-speed_benchmark', 1) -- record the time consuming
+cmd:option('-memory_benchmark', 1) -- record the memory usage
 
 -- Backend options
 cmd:option('-gpu', 0)

@@ -551,10 +551,11 @@ function hidden:UpdateStates()
     local gates = buf_GH_1:copy(self.gates:select(2, l)):view(-1, G * H)
     gates:addmm(bias_expand, h_prev_all, self.weight)
     local g = gates:narrow(2, 1, H):tanh() -- new content
-    local o = gates:narrow(2, H + 1, H) -- output gate
-    local i = gates:narrow(2, 2 * H + 1, H) -- input gate
-    local f = gates:narrow(2, 3 * H + 1, D * H) -- forget gates
-    gates:narrow(2, H + 1, (D + 2) * H):sigmoid()
+    local o = gates:narrow(2, H + 1, H):sigmoid() -- output gate
+    local i_f = gates:narrow(2, 2 * H + 1, (G - 2) * H) -- input gate and forget gates
+    self:SoftmaxForward(i_f)
+    local i = i_f:narrow(2, 1, H) -- input gate
+    local f = i_f:narrow(2, H + 1, D * H) -- forget gates
     self.gates:select(2, l):copy(buf_GH_1) -- save the gate values for backward
 
     -- update current states
@@ -688,6 +689,7 @@ function hidden:UpdateGrads(scale)
     local o = gates:narrow(2, H + 1, H)
     local i = gates:narrow(2, 2 * H + 1, H)
     local f = gates:narrow(2, 3 * H + 1, D * H)
+    local i_f = gates:narrow(2, 2 * H + 1, (G - 2) * H)
     local o_i_f = gates:narrow(2, H + 1, (G - 1) * H)
 
     -- gradients of gate activations
@@ -708,17 +710,15 @@ function hidden:UpdateGrads(scale)
     grad_c_cur:add(grad_from_h) -- accumulate the gradient of cell from current hidden state
 
     -- gradients of ao, ag, ai, af
-    grad_aoif:fill(1):add(-1, o_i_f):cmul(o_i_f)
-    grad_ao:cmul(tanh_next_c):cmul(grad_h_cur) -- grad ao
+    grad_ao:fill(1):add(-1, o):cmul(o):cmul(tanh_next_c):cmul(grad_h_cur)
     local g2 = buf_H_3:cmul(g, g)
-    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_c_cur) -- grad ag
-    local grad_c_cur_expand = buf_D1H_1
-    for d = 0, D do
-      grad_c_cur_expand:narrow(2, d * H + 1, H):copy(grad_c_cur)
+    grad_ag:fill(1):add(-1, g2):cmul(i):cmul(grad_c_cur)
+    grad_ai:cmul(g, grad_c_cur)
+    for i = 1, D do
+      grad_af:narrow(2, (i - 1) * H + 1, H):copy(grad_c_cur)
     end
-    grad_aif:cmul(grad_c_cur_expand)
-    grad_ai:cmul(g) -- grad ai
-    grad_af:cmul(c_prev_all) -- grad af
+    grad_af:cmul(c_prev_all)
+    self:SoftmaxBackward(i_f, grad_aif)
 
     -- set the activation gradients to zero in some skewed region where we don't want to accumulate the parametre gradients
     local mask_d = self.buf_H_1:copy(self.skewMask:select(2, l)):view(-1, H) -- gradient mask for one gate activation

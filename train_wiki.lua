@@ -36,8 +36,8 @@ cmd:option('-checkpoint_every', 1000)
 cmd:option('-result_dir', 'result/')
 
 -- Benchmark options
-cmd:option('-speed_benchmark', 0) -- record the time consuming
-cmd:option('-memory_benchmark', 0) -- record the memory usage
+cmd:option('-speed_benchmark', 1) -- record the time consuming
+cmd:option('-memory_benchmark', 1) -- record the memory usage
 
 -- Backend options
 cmd:option('-gpu', 0)
