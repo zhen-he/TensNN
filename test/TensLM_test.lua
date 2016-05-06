@@ -3,7 +3,7 @@ require 'nn'
 
 require 'TensLM'
 
-dropout = 0.25
+dropout = 0.4
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -18,8 +18,8 @@ end
 -- training test
 -- Just a smoke test to make sure model can run forward / backward
 function tests.simpleTest()
-  local inputShape = {3}
-  local tensShape = {2,2,2}
+  local inputShape = {6}
+  local tensShape = {3,4,5}
   local nodeSize = 5
   local batchSize = 2
   local vocabSize = 6
@@ -38,6 +38,7 @@ function tests.simpleTest()
 
   local x = torch.Tensor(N, T):random(V)
   local y = torch.Tensor(N, T):random(V)
+
   local scores = LM:forward(x)
   check_dims(scores, {N, T, V})
   local scores_view = scores:view(N * T, V)
@@ -49,8 +50,8 @@ end
 
 -- sampling test
 function tests.sampleTest()
-  local inputShape = {3}
-  local tensShape = {2,2,2}
+  local inputShape = {6}
+  local tensShape = {3,4}
   local nodeSize = 5
 
   local H = nodeSize
@@ -72,8 +73,8 @@ end
 
 -- encode/decode test
 function tests.encodeDecodeTest()
-  local inputShape = {3}
-  local tensShape = {2,2,2}
+  local inputShape = {6}
+  local tensShape = {3,4,5}
   local nodeSize = 5
 
   local H = nodeSize
