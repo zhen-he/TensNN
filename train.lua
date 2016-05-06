@@ -20,15 +20,15 @@ cmd:option('-seq_length', 50)
 cmd:option('-init_from', '')
 cmd:option('-rnn_size', 128)
 cmd:option('-inputShape', {100})
-cmd:option('-tensShape', {3})
+cmd:option('-tensShape', {3, 3})
 cmd:option('-dropout', false)
 
 -- Optimization options
 cmd:option('-max_epochs', 20)
-cmd:option('-learning_rate', 2e-3)
-cmd:option('-grad_clip', 5)
+cmd:option('-learning_rate', 1e-3)
+cmd:option('-grad_clip', 1)
 cmd:option('-lr_decay_every', 5)
-cmd:option('-lr_decay_factor', 0.5)
+cmd:option('-lr_decay_factor', 1.0)
 
 -- Output options
 cmd:option('-print_every', 10)

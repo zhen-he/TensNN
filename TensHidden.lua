@@ -9,6 +9,11 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
 
   assert(#inputShape > 0, 'invalid input shape')
   assert(#tensShape > 0, 'invalid tensorizing shape')
+  local layerNum = 1
+  for i, v in ipairs(tensShape) do
+    layerNum = layerNum + v - 1
+  end
+  assert(layerNum >= 3, 'the network must be at least 3 layers: x -> h -> y')
   assert(nodeSize > 0, 'invalid node size')
   if dropout then
     assert(dropout > 0 and dropout < 1, 'invalid dropout ratio')
@@ -23,7 +28,8 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
   self.dropout = dropout
 
   local H = nodeSize
-  self.hiddenDim = #inputShape + #tensShape
+  self.tensDim = #self.tensShape
+  self.hiddenDim = #inputShape + self.tensDim
   self.gateNum = 3 + self.hiddenDim -- new content, output gate, input gate, forget gates
   self.weight = torch.Tensor(self.hiddenDim * H, self.gateNum * H) 
   self.gradWeight = torch.Tensor(self.hiddenDim * H, self.gateNum * H):zero()
@@ -47,8 +53,8 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
   self.grads = torch.Tensor()
 
   self.gates = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), gateNum * H)
-  self.skewMask = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), H)
   self.initialStateMask = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), H)
+  self.gradActivationMask = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), H)
   self.grad_b_sum = torch.Tensor() -- This will be (1, gateNum * H)
 
   self.noise = torch.Tensor() -- This will be (N, unpack(self.hiddenShape), tensDim * H), for drop out
@@ -73,6 +79,7 @@ function hidden:reset(std)
   self.weight:normal(0, std)
   self.bias:zero()
   -- self.bias[{{3 * H + 1, self.gateNum * H}}]:fill(1) -- set the bias of forget gates to 1
+  
   return self
 end
 
@@ -116,7 +123,6 @@ function hidden:InitState(input)
     end
 
     self.inputDim = #self.inputShape
-    self.tensDim = #self.tensShape
 
     self.hiddenShape = {} -- the shape of the skewed block
     local l = 0
@@ -136,6 +142,7 @@ function hidden:InitState(input)
   local N = self.batchSize
   local H = self.nodeSize
   local I = self.inputDim
+  local T = self.tensDim
   local D = self.hiddenDim
   local G = self.gateNum
   local S = D + 2
@@ -150,16 +157,14 @@ function hidden:InitState(input)
     end
     table.insert(sz, 2 * D * H)
     self.states:resize(torch.LongStorage(sz)):zero()
-    sz[#sz - 1] = sz[#sz - 1] + 1 -- an adition size along the last tensorized dimension, for the gradients of input
     self.grads:resize(torch.LongStorage(sz)):zero()
-    sz[#sz - 1] = sz[#sz - 1] - 1
     sz[#sz] = G * H
     self.gates:resize(torch.LongStorage(sz)):zero()
     sz[#sz] = H
-    self.skewMask:resize(torch.LongStorage(sz)):zero()
+    self.gradActivationMask:resize(torch.LongStorage(sz)):zero()
     self.initialStateMask:resize(torch.LongStorage(sz)):zero()
 
-    -- define variables (with '_') sharing memory with states or grads
+    -- define variables (with '_') sharing memory with states or gradients
     self._h = self.states:narrow(S, 1, D * H)
     self._c = self.states:narrow(S, D * H + 1, D * H)
     self._grad_h = self.grads:narrow(S, 1, D * H)
@@ -176,49 +181,91 @@ function hidden:InitState(input)
     table.insert(initialState_region, {1, H})-- states of the first input dimension
     self._h0 = self._h[initialState_region]
     self._c0 = self._c[initialState_region]
-    -- initialize the mask
-    self.initialStateMask[initialState_region]:fill(1)
-    self:SkewBlock(self.initialStateMask)
-    initialState_region[D + 1] = {2, self.hiddenShape[D] + 1}
     self._grad_h0 = self._grad_h[initialState_region]
     self._grad_c0 = self._grad_c[initialState_region]
+
+    -- initialize the initial state mask
+    self.initialStateMask[initialState_region]:fill(1)
+    local before_input_region = {{}}
+    local after_output_region = {{}} -- whole batch
+    for i, v in ipairs(self.hiddenShape) do
+      if i == 1 then
+        table.insert(before_input_region, {1, self.inputShape[1] + 1}) -- except the first slice of the first input dimension
+        table.insert(after_output_region, {1, self.inputShape[1] + 1}) -- except the first slice of the first input dimension
+      elseif i <= I then
+        table.insert(before_input_region, {})
+        table.insert(after_output_region, {})
+      else
+        table.insert(before_input_region, 1) -- first slice on the tensorized dimensions
+        table.insert(after_output_region, v) -- first slice on the tensorized dimensions
+      end
+    end
+    table.insert(before_input_region, {})
+    table.insert(after_output_region, {})
+    -- we should mask the input predecessors and output successors
+    self.initialStateMask[before_input_region]:zero()
+    self.initialStateMask[after_output_region]:zero()
+    self:SkewBlock(self.initialStateMask)
+
+    -- mask for gate activation gradients (to prevent the unnecessary accumulating of the parameter gradients)
+    self.gradActivationMask:narrow(2, 2, self.inputShape[1]):fill(1) -- pass the gradients except the initial and expanded ones
+    self.gradActivationMask[before_input_region]:zero() -- mask the input predecessors
+    self.gradActivationMask[after_output_region]:zero() -- mask the output successors
+    self:SkewBlock(self.gradActivationMask) -- skew the mask
 
     local input_region = {{}} -- whole batch
     for i, v in ipairs(self.hiddenShape) do
       if i == 1 then
-        table.insert(input_region, {1, self.inputShape[1]}) -- except the last slice of the first input dimension
+        table.insert(input_region, {2, self.inputShape[1] + 1}) -- except the first slice of the first input dimension
       elseif i <= I then
         table.insert(input_region, {})
       else
         table.insert(input_region, 1) -- first slice on the tensorized dimensions
       end
     end
-    table.insert(input_region, {(D - 1) * H + 1, D * H}) -- states of the last tensorized dimension
-    self._input_h = self._h[input_region]
-    self._input_c = self._c[input_region]
+    table.insert(input_region, {I * H + 1, D * H}) -- for the tensorized dimensions
     self._gradInput_h = self._grad_h[input_region]
     self._gradInput_c = self._grad_c[input_region]
+    self._input_h = {}
+    self._input_c = {}
+    for d = 1, T do
+      -- set the input region in the states at where we should place the original input
+      input_region[2] = {2, self.inputShape[1] + 1} -- the first input dimension
+      input_region[1 + I + d] = 2 -- the d-th tensorized dimension
+      input_region[#input_region] = {(I + d - 1) * H + 1, (I + d - 1) * H + H}
+      -- place the original input in the right place and recover the index
+      self._input_h[d] = self._h[input_region]
+      self._input_c[d] = self._c[input_region]
+      input_region[1 + I + d] = 1 -- recover the d-th tensorized dimension
+    end
 
     local output_region = {{}} -- whole batch
     for i, v in ipairs(self.hiddenShape) do
       if i == 1 then
-        table.insert(output_region, {L - self.inputShape[1] + 1, L})
+        table.insert(output_region, {}) -- this will be modified
       elseif i <= I then
         table.insert(output_region, {})
       else
-        table.insert(output_region, v) -- last slice on the tensorized dimensions
+        table.insert(output_region, v) -- this will be modified
       end
     end
-    table.insert(output_region, {1, H})-- states of the first input dimension
-    self._output_h = self._h[output_region]
-    self._output_c = self._c[output_region]
-    output_region[D + 1] = self.hiddenShape[D] + 1
-    output_region[D + 2] = {(D - 1) * H + 1, D * H} -- gradients of the last tensorized dimension
-    self._gradOutput_h = self._grad_h[output_region]
-    self._gradOutput_c = self._grad_c[output_region]
-
-    self.skewMask:narrow(2, 2, self.inputShape[1]):fill(1)
-    self:SkewBlock(self.skewMask)
+    table.insert(output_region, {}) -- this will be modified
+    self._output_h = {}
+    self._output_c = {}
+    self._gradOutput_h = {}
+    self._gradOutput_c = {}
+    for d = 1, T do
+      -- set the output region in the states at where we should place the original output
+      output_region[2] = {L - 1 - self.inputShape[1] + 1, L - 1} -- the first input dimension
+      output_region[1 + I + d] = self.tensShape[d] - 1 -- the d-th tensorized dimension
+      output_region[#output_region] = {1, H} -- states of the first input dimension
+      self._output_h[d] = self._h[output_region]
+      self._output_c[d] = self._c[output_region]
+      output_region[#output_region] = {(I + d - 1) * H + 1, (I + d - 1) * H + H} -- gradients of the last tensorized dimension
+      self._gradOutput_h[d] = self._grad_h[output_region]
+      self._gradOutput_c[d] = self._grad_c[output_region]
+      output_region[1 + I + d] = self.tensShape[d] -- recover the d-th tensorized dimension
+    end
 
     -- layer buffers
     table.remove(sz, 2) -- a slice along the first input dimension
@@ -264,10 +311,10 @@ function hidden:clearState()
 
   -- network states
   self.states:set()
+  self.grads:set()
   self.gates:set()
   self.initialStateMask:set()
-  self.skewMask:set()
-  self.grads:set()
+  self.gradActivationMask:set()
 
   -- shared variables
   self._h:set()
@@ -278,14 +325,19 @@ function hidden:clearState()
   self._c0:set()
   self._grad_h0:set()
   self._grad_c0:set()
-  self._input_h:set()
-  self._input_c:set()
+  for d = 1, self.tensDim do
+    self._input_h[d]:set()
+    self._input_c[d]:set()
+  end
   self._gradInput_h:set()
   self._gradInput_c:set()
-  self._output_h:set()
-  self._output_c:set()
-  self._gradOutput_h:set()
-  self._gradOutput_c:set()
+  for d = 1, self.tensDim do
+    self._output_h[d]:set()
+    self._output_c[d]:set()
+    self._gradOutput_h[d]:set()
+    self._gradOutput_c[d]:set()
+  end
+  self._inputMask:set()
 
   -- layer buffers
   self.buf_H_1:set()
@@ -317,7 +369,7 @@ function hidden:CheckSize(input, gradOutput)
 
   assert(torch.isTensor(input))
   assert(input:dim() >= 3) -- batch, input dim, node vector
-  assert(input:size(input:dim()) == self.nodeSize * 2) -- hidden vector and cell vector
+  assert(input:size(input:dim()) == self.nodeSize * self.tensDim * 2) -- hidden vector and cell vector
 
   if gradOutput then
     assert(gradOutput:dim() == input:dim())
@@ -361,71 +413,25 @@ function hidden:DropoutBackward(noise, gradOutput)
 end
 
 
-function hidden:SoftmaxForward(input)
-  local H = self.nodeSize
-  local D = self.hiddenDim
-  assert(input:size(2) == (D + 1) * H)
-
-  local a_max = self.buf_H_1:copy(input:narrow(2, 1, H))
-  for i = 1, D do
-    local a = input:narrow(2, i * H + 1, H)
-    a_max:cmax(a)
-  end
-
-  local exp_sum = self.buf_H_2:zero()
-  for i = 0, D do
-    local a = input:narrow(2, i * H + 1, H)
-    a:add(-1, a_max):exp()
-    exp_sum:add(a)
-  end
-
-  for i = 0, D do
-    local a = input:narrow(2, i * H + 1, H)
-    a:cdiv(exp_sum)
-  end
-end
-
-
-function hidden:SoftmaxBackward(output, gradOutput)
-  local H = self.nodeSize
-  local D = self.hiddenDim
-  assert(output:size(2) == (D + 1) * H)
-  assert(gradOutput:size(2) == output:size(2))
-
-  local product_sum = self.buf_H_1:zero()
-  for i = 0, D do
-    local output_every = output:narrow(2, i * H + 1, H)
-    local gradOutput_every = gradOutput:narrow(2, i * H + 1, H)
-    gradOutput_every:cmul(output_every)
-    product_sum:add(gradOutput_every)
-  end
-
-  for i = 0, D do
-    local output_every = output:narrow(2, i * H + 1, H)
-    local gradOutput_every = gradOutput:narrow(2, i * H + 1, H)
-    gradOutput_every:addcmul(-1, output_every, product_sum)
-  end
-end
-
-
 function hidden:updateOutput(input)
   self.recompute_backward = true
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x)
   self.isReturnGradH0 = (h0 ~= nil)
   self.isReturnGradC0 = (c0 ~= nil)
-timer = torch.Timer()
+-- timer = torch.Timer()
   self:InitState(x)
-print('\nA: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
+-- print('\nA: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   self:SetInitialStates(h0, c0)
-print('\nB: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
-  self:SetInput(x)
-print('\nC: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
-  self:UpdateStates()
-print('\nD: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
 
+-- print('\nB: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
+  self:SetInput(x)
+
+-- print('\nC: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
+  self:UpdateStates()
+-- print('\nD: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   self:GetOutput()
-print('\nE: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
+-- print('\nE: ' .. timer:time().real * 1e3 .. ' ms');timer = torch.Timer()
   return self.output
 end
 
@@ -464,15 +470,19 @@ function hidden:SetInitialStates(h0, c0)
     end
   end
 
+  -- extract initial states from previous batch
   if isRemember then
     local len = self.hiddenShape[1] - self.inputShape[1]
-    local buf = self.grads:narrow(D + 1, 1, self.hiddenShape[D]) -- use the grads as a buffer temporally 
-    buf:narrow(2, 1, len):copy(self.states:narrow(2, self.inputShape[1] + 1, len))
-    self.states:zero()
-    self.states:narrow(D + 2, 1, H):copy(self.initialStateMask)
-    self.states:narrow(D + 2, D * H + 1, H):copy(self.initialStateMask)
-    self.states:cmul(buf) -- mask all except the initial states
+    local buf = self.grads:narrow(2, 1, len) -- use the grads as a buffer temporally 
+    buf:copy(self.states:narrow(2, self.inputShape[1] + 1, len))
+    self.states:narrow(2, 1, len):copy(buf)
   end
+
+  -- mask other regions
+  self._h:narrow(D + 2, 1, H):cmul(self.initialStateMask)
+  self._h:narrow(D + 2, H + 1, (D - 1) * H):zero()
+  self._c:narrow(D + 2, 1, H):cmul(self.initialStateMask)
+  self._c:narrow(D + 2, H + 1, (D - 1) * H):zero()
 
 end
 
@@ -492,11 +502,38 @@ end
 
 function hidden:SetInput(input)
   local H = self.nodeSize
-  local input_h = input:narrow(input:dim(), 1, H)
-  local input_c = input:narrow(input:dim(), H + 1, H)
+  local I = self.inputDim
+  local T = self.tensDim
 
-  self._input_h:copy(input_h)
-  self._input_c:copy(input_c)
+  for d = 1, T do
+    -- the original input for the d-th tensorized dimension
+    local input_h_d = input:narrow(input:dim(), (d - 1) * H + 1, H)
+    local input_c_d = input:narrow(input:dim(), (T + d - 1) * H + 1, H)
+    -- place the original input in the right place
+    self._input_h[d]:copy(input_h_d)
+    self._input_c[d]:copy(input_c_d)
+  end
+
+  -- the input mask
+  self._inputMask = self.grads:zero():narrow(self.grads:dim(), 1, T * H)
+  local input_region = {{}} -- whole batch
+  for i, v in ipairs(self.hiddenShape) do
+    if i == 1 then
+      table.insert(input_region, {2, self.inputShape[1] + 1}) -- except the first slice of the first input dimension
+    elseif i <= I then
+      table.insert(input_region, {})
+    else
+      table.insert(input_region, 1) -- first slice on the tensorized dimensions
+    end
+  end
+  table.insert(input_region, {})
+  for d = 1, T do
+    input_region[1 + I + d] = 2 -- the d-th tensorized dimension
+    input_region[#input_region] = {(d - 1) * H + 1, (d - 1) * H + H}
+    self._inputMask[input_region]:fill(1)
+    input_region[1 + I + d] = 1 -- recover the d-th tensorized dimension
+  end
+
 end
 
 
@@ -528,6 +565,8 @@ end
 
 function hidden:UpdateStates()
   local H = self.nodeSize
+  local I = self.inputDim
+  local T = self.tensDim
   local D = self.hiddenDim
   local G = self.gateNum
   local L = self.states:size(2)
@@ -536,6 +575,7 @@ function hidden:UpdateStates()
   local buf_H_2 = self.buf_H_2:view(-1, H)
   local buf_H_3 = self.buf_H_3
   local buf_DH_1 = self.buf_DH_1:view(-1, D * H)
+  local buf_TH_1 = self.buf_DH_2:narrow(self.buf_DH_2:dim(), 1, T * H)
   local buf_2DH_1 = self.buf_2DH_1
   local buf_2DH_2 = self.buf_2DH_2
   local buf_GH_1 = self.buf_GH_1
@@ -584,21 +624,28 @@ function hidden:UpdateStates()
     end
 
      -- for the node where initial state exists, we block the updated state for the first input dimension and use the original one
-    local mask_1 = buf_H_3:copy(self.initialStateMask:select(2, l)) -- initial state mask for the first input dimension
     local mask_all = buf_2DH_2:zero() -- initial state mask for all directions of h and c
+    local mask_1 = buf_H_3:copy(self.initialStateMask:select(2, l)) -- initial state mask for the first input dimension
     mask_all:narrow(mask_all:dim(), 1, H):copy(mask_1)
     mask_all:narrow(mask_all:dim(), D * H + 1, H):copy(mask_1)
-    local s_cur_all_res = self.states:select(2, l):cmul(mask_all) -- the reserved initial states
+    -- for the node where input exists, we block the updated state for the last tensorized dimension and use the original one
+    local mask_T = buf_TH_1:copy(self._inputMask:select(2, l)) -- input mask for the all the tensorized dimensions
+    mask_all:narrow(mask_all:dim(), I * H + 1, (D - 1) * H):copy(mask_T)
+    mask_all:narrow(mask_all:dim(), (D + I) * H + 1, (D - 1) * H):copy(mask_T)
+
+    -- final states = reserved states + filtered new states
+    local s_cur_all_res = self.states:select(2, l):cmul(mask_all) -- the reserved states
     local s_cur_all_new = mask_all:mul(-1):add(1):cmul(s_cur_all) -- the filtered new states
     local s_cur_all_final = s_cur_all_res:add(s_cur_all_new)
-
+  
   end
 
 end
 
 
 function hidden:GetOutput() -- operated on skewed block
-  self.output = torch.cat(self._output_h, self._output_c, self.inputDim + 2)
+  local I = self.inputDim
+  self.output = torch.cat(torch.cat(self._output_h, I + 2), torch.cat(self._output_c, I + 2), I + 2)
 end
 
 
@@ -608,15 +655,20 @@ function hidden:backward(input, gradOutput, scale)
   local x, h0, c0 = self:UnpackInput(input)
   self:CheckSize(x, gradOutput)
 -- timer = torch.Timer()
+
   self:SetGradOutput(gradOutput)
 -- print('\nA: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
   self:UpdateGrads(scale)
 -- print('\nB: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
   self:GetGradInput()
 -- print('\nC: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
   if self.isReturnGradH0 or self.isReturnGradC0 then
     self:GetGradInitialStates()
   end
+
 -- print('\nD: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
   if self.isReturnGradH0 and self.isReturnGradC0 then
     self.gradInput = {self.grad_x, self.grad_h0, self.grad_c0}
@@ -625,7 +677,6 @@ function hidden:backward(input, gradOutput, scale)
   else
     self.gradInput = self.grad_x
   end
-
   return self.gradInput
 
 end
@@ -633,12 +684,17 @@ end
 
 function hidden:SetGradOutput(gradOutput)
   local H = self.nodeSize
-  local gradOutput_h = gradOutput:narrow(gradOutput:dim(), 1, H)
-  local gradOutput_c = gradOutput:narrow(gradOutput:dim(), H + 1, H)
+  local T = self.tensDim
 
   self.grads:zero()
-  self._gradOutput_h:copy(gradOutput_h)
-  self._gradOutput_c:copy(gradOutput_c)
+  for d = 1, T do
+    -- the original gradOutput region for the d-th tensorized dimension
+    local gradOutput_h_d = gradOutput:narrow(gradOutput:dim(), (d - 1) * H + 1, H)
+    local gradOutput_c_d = gradOutput:narrow(gradOutput:dim(), (T + d - 1) * H + 1, H)
+    -- place the original gradOutput in the right place
+    self._gradOutput_h[d]:copy(gradOutput_h_d)
+    self._gradOutput_c[d]:copy(gradOutput_c_d)
+  end
 end
 
 
@@ -647,7 +703,6 @@ function hidden:UpdateGrads(scale)
   assert(scale == 1.0, 'must have scale=1')
   local H = self.nodeSize
   local D = self.hiddenDim
-  local T = self.hiddenShape[self.hiddenDim]
   local G = self.gateNum
   local L = self.grads:size(2)
 
@@ -663,7 +718,8 @@ function hidden:UpdateGrads(scale)
   local buf_GH_2 = self.buf_GH_2:view(-1, G * H)
   local buf_GH_3 = self.buf_GH_3:view(-1, G * H)
 
-  for l = L, 2, -1 do
+  for l = L - 1, 3, -1 do
+
 -- local timer = torch.Timer()
     -- extract states of previous layer
     local s_prev_all = buf_2DH_1:copy(self.states:select(2, l - 1)):view(-1, 2 * D * H) -- a slice along the fisrt input dimension
@@ -671,8 +727,7 @@ function hidden:UpdateGrads(scale)
     local c_prev_all = s_prev_all:narrow(2, D * H + 1, D * H)
 -- print('\nA: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
     -- extract gradients of current layer (unsummed gradients from all directions)
-    local grads_ = self.grads:narrow(D + 1, 2, T) -- gradients without the input gradients
-    local grad_s_cur_all = buf_2DH_2:copy(grads_:select(2, l)):view(-1, 2 * D * H)
+    local grad_s_cur_all = buf_2DH_2:copy(self.grads:select(2, l)):view(-1, 2 * D * H)
     local grad_h_cur_all = grad_s_cur_all:narrow(2, 1, D * H)
     local grad_c_cur_all = grad_s_cur_all:narrow(2, D * H + 1, D * H)
 -- print('\n' ..l..': ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
@@ -681,7 +736,7 @@ function hidden:UpdateGrads(scale)
     local grad_h_cur = buf_H_1:view(-1, 1, H):sum(grad_h_cur_all_, 2):view(-1, H)
     local grad_c_cur_all_ = buf_DH_1:copy(grad_c_cur_all):view(-1, D, H)
     local grad_c_cur = buf_H_2:view(-1, 1, H):sum(grad_c_cur_all_, 2):view(-1, H)
--- print('\n' ..l..': ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
     -- extract gates of current layer
     local gates = buf_GH_1:copy(self.gates:select(2, l)):view(-1, G * H)
     local g = gates:narrow(2, 1, H)
@@ -721,10 +776,10 @@ function hidden:UpdateGrads(scale)
     grad_af:cmul(c_prev_all) -- grad af
 
     -- set the activation gradients to zero in some skewed region where we don't want to accumulate the parametre gradients
-    local mask_d = self.buf_H_1:copy(self.skewMask:select(2, l)):view(-1, H) -- gradient mask for one gate activation
+    local mask_d = self.buf_H_1:copy(self.gradActivationMask:select(2, l)):view(-1, H) -- gradient mask for one gate activations
     local mask_all = buf_GH_3:zero() -- gradient mask for all gate activations
     for d = 1, G do
-      mask_all:narrow(2, (d - 1) * H + 1, H):copy(mask_d)
+      mask_all:narrow(2, (d - 1) * H + 1, H):copy(mask_d) -- to save the memory, but will cost some time
     end
     grad_a:cmul(mask_all)
 
@@ -749,6 +804,7 @@ function hidden:UpdateGrads(scale)
 
     -- propagate the gradients to previous layer (align the gradients)
     for d = 1, D do
+
       -- extract gradients in each direction
       local grad_h_prev_d_new = buf_H_1:copy(grad_h_prev_all_new:narrow(2, (d - 1) * H + 1, H)):viewAs(self.buf_H_1)
       local grad_c_prev_d_new = buf_H_2:copy(grad_c_prev_all_new:narrow(2, (d - 1) * H + 1, H)):viewAs(self.buf_H_1)
@@ -756,22 +812,19 @@ function hidden:UpdateGrads(scale)
       local grad_c_prev_d = grad_c_prev_all:narrow(S, (d - 1) * H + 1, H)
       -- shift the gradients' position along each direction 
       if d == 1 then -- directly copy along the first input dimension
-        grad_h_prev_d:narrow(D, 2, T):copy(grad_h_prev_d_new)
-        grad_c_prev_d:narrow(D, 2, T):copy(grad_c_prev_d_new)
-      elseif d == D then -- shifted copy along the last tensorized dimension
-        grad_h_prev_d:narrow(D, 1, T):copy(grad_h_prev_d_new)
-        grad_c_prev_d:narrow(D, 1, T):copy(grad_c_prev_d_new)
+        grad_h_prev_d:add(grad_h_prev_d_new)
+        grad_c_prev_d:add(grad_c_prev_d_new)
       else -- shifted copy along the other dimensions (the gradients will flow out)
         local len = grad_h_prev_d:size(d)
         if len > 1 then
-          grad_h_prev_d:narrow(D, 2, T):narrow(d, 1, len - 1):copy(grad_h_prev_d_new:narrow(d, 2, len - 1))
-          grad_c_prev_d:narrow(D, 2, T):narrow(d, 1, len - 1):copy(grad_c_prev_d_new:narrow(d, 2, len - 1))
+          grad_h_prev_d:narrow(d, 1, len - 1):add(grad_h_prev_d_new:narrow(d, 2, len - 1))
+          grad_c_prev_d:narrow(d, 1, len - 1):add(grad_c_prev_d_new:narrow(d, 2, len - 1))
         end
       end
     end
 
   end
-
+-- print(self.grads:select(2, 2))
 end
 
 
@@ -781,10 +834,7 @@ end
 
 
 function hidden:GetGradInitialStates()
-  local D = self.hiddenDim
-  local T = self.hiddenShape[self.hiddenDim]
-  local grads_ = self.grads:narrow(D + 1, 2, T) -- gradients without the input gradients
-  self:RecoverBlock(grads_)
+  self:RecoverBlock(self.grads)
   self.grad_h0 = self._grad_h0:clone()
   self.grad_c0 = self._grad_c0:clone()
 end

@@ -23,10 +23,10 @@ function LM:__init(kwargs)
   self.tensShape = utils.get_kwarg(kwargs, 'tensShape')
   self.dropout = utils.get_kwarg(kwargs, 'dropout')
 
-  local V, H = self.vocab_size, self.rnn_size
+  local V, H, E = self.vocab_size, self.rnn_size, #self.tensShape
 
   self.net = nn.Sequential()
-  self.net:add(nn.LookupTable(V, 2 * H)) -- embedding
+  self.net:add(nn.LookupTable(V, 2 * E * H)) -- embedding, N * T -> N * T * 2EH
 
   self.tensHidden = nn.TensHidden(self.inputShape, self.tensShape, H, self.dropout)
   self.tensHidden.remember_states = true
@@ -40,7 +40,7 @@ function LM:__init(kwargs)
   self.view2 = nn.View(1, -1):setNumInputDims(2)
 
   self.net:add(self.view1)
-  self.net:add(nn.Linear(2 * H, V))
+  self.net:add(nn.Linear(2 * E * H, V))
   self.net:add(self.view2)
 end
 
