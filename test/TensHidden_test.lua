@@ -175,7 +175,7 @@ end
 
 function tests.rememberStatesTest()
 
-  local inputShape = {4}
+  local inputShape = {12}
   local tensShape = {3,3}
   local nodeSize = 3
   local batchSize = 2
@@ -210,6 +210,34 @@ function tests.rememberStatesTest()
   hidden:backward(x, dout)
   tester:assertTensorEq(hidden.c0, torch.zeros(torch.LongStorage(sz_h)), 0)
   tester:assertTensorEq(hidden.h0, torch.zeros(torch.LongStorage(sz_h)), 0)
+end
+
+
+function tests.rememberStatesTestV2()
+
+  local inputShape = {12}
+  local tensShape = {3,3}
+  local nodeSize = 3
+  local batchSize = 2
+  
+  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+  local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
+
+  local x = torch.randn(torch.LongStorage(sz_x))
+  local T = inputShape[1]
+  local x1 = x[{{}, {1, T / 3}}]:clone()
+  local x2 = x[{{}, {T / 3 + 1, 2 * T / 3}}]:clone()
+  local x3 = x[{{}, {2 * T / 3 + 1, T}}]:clone()
+
+  local y = hidden:forward(x):clone()
+  hidden.remember_states = true
+  hidden:resetStates()
+  local y1 = hidden:forward(x1):clone()
+  local y2 = hidden:forward(x2):clone()
+  local y3 = hidden:forward(x3):clone()
+
+  local yy = torch.cat({y1, y2, y3}, 2)
+  tester:assertTensorEq(y, yy, 0)
 end
 
 
