@@ -668,8 +668,8 @@ function hidden:backward(input, gradOutput, scale)
   if self.isReturnGradH0 or self.isReturnGradC0 then
     self:GetGradInitialStates()
   end
-
 -- print('\nD: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
   if self.isReturnGradH0 and self.isReturnGradC0 then
     self.gradInput = {self.grad_x, self.grad_h0, self.grad_c0}
   elseif self.isReturnGradH0 then
@@ -725,12 +725,12 @@ function hidden:UpdateGrads(scale)
     local s_prev_all = buf_2DH_1:copy(self.states:select(2, l - 1)):view(-1, 2 * D * H) -- a slice along the fisrt input dimension
     local h_prev_all = s_prev_all:narrow(2, 1, D * H)
     local c_prev_all = s_prev_all:narrow(2, D * H + 1, D * H)
--- print('\nA: ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
     -- extract gradients of current layer (unsummed gradients from all directions)
     local grad_s_cur_all = buf_2DH_2:copy(self.grads:select(2, l)):view(-1, 2 * D * H)
     local grad_h_cur_all = grad_s_cur_all:narrow(2, 1, D * H)
     local grad_c_cur_all = grad_s_cur_all:narrow(2, D * H + 1, D * H)
--- print('\n' ..l..': ' .. timer:time().real * 1e3 .. ' ms');timer:reset()
+
     -- sum the gradients from all directions
     local grad_h_cur_all_ = buf_DH_1:copy(grad_h_cur_all):view(-1, D, H)
     local grad_h_cur = buf_H_1:view(-1, 1, H):sum(grad_h_cur_all_, 2):view(-1, H)
@@ -824,7 +824,7 @@ function hidden:UpdateGrads(scale)
     end
 
   end
--- print(self.grads:select(2, 2))
+
 end
 
 

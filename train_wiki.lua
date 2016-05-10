@@ -19,7 +19,7 @@ cmd:option('-seq_length', 100)
 -- Model options
 cmd:option('-init_from', '')
 cmd:option('-rnn_size', 700)
-cmd:option('-inputShape', {1})
+cmd:option('-inputShape', {100})
 cmd:option('-tensShape', {4, 4})
 cmd:option('-dropout', false)
 
@@ -32,7 +32,7 @@ cmd:option('-lr_decay_factor', 1.0)
 
 -- Output options
 cmd:option('-print_every', 10)
-cmd:option('-checkpoint_every', 1000)
+cmd:option('-checkpoint_every', 5000)
 cmd:option('-result_dir', 'result/')
 
 -- Benchmark options

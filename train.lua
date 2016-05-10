@@ -18,9 +18,10 @@ cmd:option('-seq_length', 50)
 
 -- Model options
 cmd:option('-init_from', '')
+cmd:option('-reset_iterations', 0)
 cmd:option('-rnn_size', 128)
 cmd:option('-inputShape', {100})
-cmd:option('-tensShape', {3, 3})
+cmd:option('-tensShape', {3})
 cmd:option('-dropout', false)
 
 -- Optimization options
@@ -52,7 +53,9 @@ local dp = 'nodp'
 if opt.dropout then dp = 'dp' .. opt.dropout end
 for _, v in ipairs(opt.tensShape) do filenamehd = filenamehd .. v end
 filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. dp
+local filedir = opt.result_dir .. filenamehd .. '/'
 filenamehd = opt.result_dir .. filenamehd .. '/' .. filenamehd .. '_'
+
 
 
 -- Set up GPU stuff
@@ -89,9 +92,15 @@ end
 
 -- Initialize the model and criterion
 local model = nil  -- model
+local start_i = 0
 if opt.init_from ~= '' then
-  print('Initializing from ', opt.init_from)
-  model = torch.load(opt.init_from).model:type(dtype)
+  local initfilename = filedir .. opt.init_from
+  print('Initializing from ', initfilename)
+  local checkpoint = torch.load(initfilename)
+  model = checkpoint.model:type(dtype)
+  if opt.reset_iterations == 0 then
+    start_i = checkpoint.i
+  end
 else
   local opt_clone = torch.deserialize(torch.serialize(opt)) -- used as copy
   opt_clone.idx_to_token = idx_to_token
@@ -173,7 +182,7 @@ local optim_config = {learningRate = opt.learning_rate, beta2 = 0.99}
 local num_train = loader.split_sizes['train']
 local num_iterations = opt.max_epochs * num_train -- the maximum iteration number
 model:training()
-for i = 1, num_iterations do
+for i = start_i + 1, num_iterations do
 
   -- Take a gradient step and maybe print, note that adam returns a singleton array of losses
   local _, loss = optim.adam(f, params, optim_config)
@@ -226,6 +235,7 @@ for i = 1, num_iterations do
       val_loss_history_it = val_loss_history_it,
       forward_backward_times = forward_backward_times,
       memory_usage = memory_usage,
+      i = i
     }
     local filename = string.format('%s%d.json', filenamehd, i)
     paths.mkdir(paths.dirname(filename))
