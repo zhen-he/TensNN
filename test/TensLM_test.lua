@@ -4,6 +4,7 @@ require 'nn'
 require 'TensLM'
 
 dropout = 0.4
+rnn_type = 'multi'
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -31,6 +32,7 @@ function tests.simpleTest()
     rnn_size = H,
     inputShape = inputShape,
     tensShape = tensShape,
+    rnn_type = rnn_type,
     dropout = dropout
   }
   local crit = nn.CrossEntropyCriterion()
@@ -61,6 +63,7 @@ function tests.sampleTest()
     rnn_size = H,
     inputShape = inputShape,
     tensShape = tensShape,
+    rnn_type = rnn_type,
     dropout = dropout
   }
   
@@ -87,6 +90,7 @@ function tests.encodeDecodeTest()
     rnn_size = H,
     inputShape = inputShape,
     tensShape = tensShape,
+    rnn_type = rnn_type,
     dropout = dropout
   }
 

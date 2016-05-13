@@ -4,7 +4,7 @@ require 'nn'
 require 'TensHidden'
 local gradcheck = require 'util.gradcheck'
 
-dropout = nil
+rnn_type = 'multi'
 local tests = torch.TestSuite()
 local tester = torch.Tester()
 
@@ -49,7 +49,7 @@ function tests.gradcheck()
   local nodeSize = 3
   local batchSize = 3
 
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, rnn_type)
 
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
   local x  = torch.randn(torch.LongStorage(sz_x))--:fill(2)
@@ -89,9 +89,9 @@ function tests.gradcheck()
     return out
   end
 
-  if dropout then -- freeze the drop out noise to fix the network
-    hidden.freezeNoise = true 
-  end
+--  if dropout then -- freeze the drop out noise to fix the network
+--    hidden.freezeNoise = true 
+--  end
   
   local dx_num = gradcheck.numeric_gradient(fx, x, dy)
   local dh0_num = gradcheck.numeric_gradient(fh0, h0, dy)
@@ -122,7 +122,7 @@ function tests.noCellTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, rnn_type)
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
   for t = 1, 3 do
@@ -153,7 +153,7 @@ function tests.noHiddenTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, rnn_type)
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
   for t = 1, 3 do
@@ -180,7 +180,7 @@ function tests.rememberStatesTest()
   local nodeSize = 3
   local batchSize = 2
 
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, rnn_type)
   hidden.remember_states = true
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
@@ -220,7 +220,7 @@ function tests.rememberStatesTestV2()
   local nodeSize = 3
   local batchSize = 2
   
-  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, dropout)
+  local hidden = nn.TensHidden(inputShape,tensShape, nodeSize, rnn_type)
   local sz_x, sz_h = GetInputAndInitStateSizes(inputShape, tensShape, nodeSize, batchSize)
 
   local x = torch.randn(torch.LongStorage(sz_x))
