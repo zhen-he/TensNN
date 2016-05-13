@@ -5,7 +5,7 @@ require 'nn'
 local hidden, parent = torch.class('nn.TensHidden', 'nn.Module')
 
 
-function hidden:__init(inputShape, tensShape, nodeSize, dropout)
+function hidden:__init(inputShape, tensShape, nodeSize, rnn_type)
 
   assert(#inputShape > 0, 'invalid input shape')
   assert(#tensShape > 0, 'invalid tensorizing shape')
@@ -15,9 +15,6 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
   end
   assert(layerNum >= 3, 'the network must be at least 3 layers: x -> h -> y')
   assert(nodeSize > 0, 'invalid node size')
-  if dropout then
-    assert(dropout > 0 and dropout < 1, 'invalid dropout ratio')
-  end
 
   parent.__init(self)
 
@@ -25,14 +22,29 @@ function hidden:__init(inputShape, tensShape, nodeSize, dropout)
   self.tensShape = tensShape -- table
   self.nodeSize = nodeSize
   self.batchSize = nil
-  self.dropout = dropout
+
+  self.rnn_type = rnn_type or 'multi'
+  if self.rnn_type == 'multi' then
+    print('\nRNN type: MD-LSTM\n')
+  elseif self.rnn_type == 'share' then
+    print('\nRNN type: MD-LSTM with shared parameters for the tensorized dimensions\n')
+  else
+    print('\nRNN type: Stacked LSTM with no LSTM cells along the tensorized dimensions\n')
+  end
 
   local H = nodeSize
   self.tensDim = #self.tensShape
   self.hiddenDim = #inputShape + self.tensDim
   self.gateNum = 3 + self.hiddenDim -- new content, output gate, input gate, forget gates
-  self.weight = torch.Tensor(self.hiddenDim * H, self.gateNum * H) 
-  self.gradWeight = torch.Tensor(self.hiddenDim * H, self.gateNum * H):zero()
+  if self.rnn_type == 'share' then
+    self.weight = torch.Tensor((#inputShape + 1) * H, self.gateNum * H)
+    self._weight = torch.Tensor(self.hiddenDim * H, self.gateNum * H) -- augmented weights, as the parameters are shared
+    self.gradWeight = torch.Tensor((#inputShape + 1) * H, self.gateNum * H):zero()
+    self._gradWeight = torch.Tensor(self.hiddenDim * H, self.gateNum * H):zero()
+  else
+    self.weight = torch.Tensor(self.hiddenDim * H, self.gateNum * H) 
+    self.gradWeight = torch.Tensor(self.hiddenDim * H, self.gateNum * H):zero()
+  end
   self.bias = torch.Tensor(self.gateNum * H)
   self.gradBias = torch.Tensor(self.gateNum * H):zero()
   self:reset()
@@ -74,7 +86,7 @@ end
 function hidden:reset(std)
   local H = self.nodeSize
   if not std then
-    std = 1.0 / math.sqrt(self.hiddenDim * H)
+    std = 1.0 / math.sqrt(self.weight:size(1))
   end
   self.weight:normal(0, std)
   self.bias:zero()
@@ -581,6 +593,13 @@ function hidden:UpdateStates()
   local buf_GH_1 = self.buf_GH_1
   local bias_expand = self.bias:view(1, G * H):expand(buf_H_1:size(1), G * H)
 
+  if self.rnn_type == 'share' then
+    self._weight:narrow(1, 1, (I + 1) * H):copy(self.weight)
+    for i = I + 1, D - 1 do
+      self._weight:narrow(1, i * H + 1, H):copy(self.weight:narrow(1, I * H + 1, H))
+    end
+  end
+
   for l = 2, L do
     -- extract predecessor states for current layer
     local s_prev_all = buf_2DH_1:copy(self.states:select(2, l - 1)):view(-1, 2 * D * H) -- a slice along the fisrt input dimension
@@ -589,12 +608,19 @@ function hidden:UpdateStates()
 
     -- update gates
     local gates = buf_GH_1:copy(self.gates:select(2, l)):view(-1, G * H)
-    gates:addmm(bias_expand, h_prev_all, self.weight)
+    if self.rnn_type == 'share' then
+      gates:addmm(bias_expand, h_prev_all, self._weight)
+    else
+      gates:addmm(bias_expand, h_prev_all, self.weight)
+    end
     local g = gates:narrow(2, 1, H):tanh() -- new content
     local o = gates:narrow(2, H + 1, H) -- output gate
     local i = gates:narrow(2, 2 * H + 1, H) -- input gate
     local f = gates:narrow(2, 3 * H + 1, D * H) -- forget gates
     gates:narrow(2, H + 1, (D + 2) * H):sigmoid()
+    if self.rnn_type == 'stack' then
+      f:narrow(2, I * H + 1, T * H):zero() -- disable the forget gate for all tensorized dimensions
+    end
     self.gates:select(2, l):copy(buf_GH_1) -- save the gate values for backward
 
     -- update current states
@@ -702,6 +728,7 @@ function hidden:UpdateGrads(scale)
   scale = scale or 1.0
   assert(scale == 1.0, 'must have scale=1')
   local H = self.nodeSize
+  local I = self.inputDim
   local D = self.hiddenDim
   local G = self.gateNum
   local L = self.grads:size(2)
@@ -717,6 +744,10 @@ function hidden:UpdateGrads(scale)
   local buf_GH_1 = self.buf_GH_1
   local buf_GH_2 = self.buf_GH_2:view(-1, G * H)
   local buf_GH_3 = self.buf_GH_3:view(-1, G * H)
+
+  if self.rnn_type == 'share' then
+    self._gradWeight:zero()
+  end
 
   for l = L - 1, 3, -1 do
 
@@ -784,12 +815,20 @@ function hidden:UpdateGrads(scale)
     grad_a:cmul(mask_all)
 
     -- gradients of parameters
-    self.gradWeight:addmm(scale, h_prev_all:t(), grad_a)
+    if self.rnn_type == 'share' then
+      self._gradWeight:addmm(scale, h_prev_all:t(), grad_a)
+    else
+      self.gradWeight:addmm(scale, h_prev_all:t(), grad_a)
+    end
     self.grad_b_sum:sum(grad_a, 1) -- directly accumulate grad_b (equal to grad_a) inside a batch
     self.gradBias:add(scale, self.grad_b_sum)
 
     -- gradients of previous hidden states and memory cells (for all the direction)
-    grad_h_prev_all_new = buf_DH_1:mm(grad_a, self.weight:t())
+    if self.rnn_type == 'share' then
+      grad_h_prev_all_new = buf_DH_1:mm(grad_a, self._weight:t())
+    else
+      grad_h_prev_all_new = buf_DH_1:mm(grad_a, self.weight:t())
+    end
     grad_c_prev_all_new = buf_DH_2
     for d = 1, D do
       grad_c_prev_all_new:narrow(2, (d - 1) * H + 1, H):copy(grad_c_cur)
@@ -823,6 +862,13 @@ function hidden:UpdateGrads(scale)
       end
     end
 
+  end
+
+  if self.rnn_type == 'share' then
+    self.gradWeight:add(self._gradWeight:narrow(1, 1, (I + 1) * H))
+    for i = I + 1, D - 1 do
+      self.gradWeight:narrow(1, I * H + 1, H):add(self._gradWeight:narrow(1, i * H + 1, H))
+    end
   end
 
 end

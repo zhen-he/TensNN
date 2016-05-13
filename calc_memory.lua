@@ -1,10 +1,10 @@
 import 'torch'
 
-local N = 50
-local inputShape = {50}
-local tensShape = {7}
-local H = 256
-local V = 65
+local N = 100
+local inputShape = {100}
+local tensShape = {2,2}
+local H = 846
+local V = 205
 
 local hiddenShape = {} -- the shape of the skewed block
 local l = 0

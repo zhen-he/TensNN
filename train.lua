@@ -11,8 +11,7 @@ local unpack = unpack or table.unpack
 local cmd = torch.CmdLine()
 
 -- Dataset options
-cmd:option('-input_h5', 'data/tiny-shakespeare.h5')
-cmd:option('-input_json', 'data/tiny-shakespeare.json')
+cmd:option('-input_file', 'data/tiny-shakespeare')
 cmd:option('-batch_size', 50)
 cmd:option('-seq_length', 50)
 
@@ -22,6 +21,7 @@ cmd:option('-reset_iterations', 0)
 cmd:option('-rnn_size', 128)
 cmd:option('-inputShape', {100})
 cmd:option('-tensShape', {3})
+cmd:option('-rnn_type', 'multi') -- multi: MD-LSTM, share: MD-LSTM with shared parameters, stack: s-LSTM
 cmd:option('-dropout', false)
 
 -- Optimization options
@@ -49,13 +49,10 @@ local opt = cmd:parse(arg)
 
 -- directory names for saving
 local filenamehd = 't'
-local dp = 'nodp'
-if opt.dropout then dp = 'dp' .. opt.dropout end
 for _, v in ipairs(opt.tensShape) do filenamehd = filenamehd .. v end
-filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. dp
+filenamehd = filenamehd .. '_s' .. opt.rnn_size .. '_' .. opt.rnn_type
 local filedir = opt.result_dir .. filenamehd .. '/'
 filenamehd = opt.result_dir .. filenamehd .. '/' .. filenamehd .. '_'
-
 
 
 -- Set up GPU stuff
@@ -83,7 +80,7 @@ end
 
 -- Initialize the DataLoader and vocabulary
 local loader = DataLoader(opt)
-local vocab = utils.read_json(opt.input_json)
+local vocab = utils.read_json(opt.input_file .. '.json')
 local idx_to_token = {}
 for k, v in pairs(vocab.idx_to_token) do
   idx_to_token[tonumber(k)] = v
@@ -92,13 +89,24 @@ end
 
 -- Initialize the model and criterion
 local model = nil  -- model
+local train_loss_history = {}
+local val_loss_history = {}
+local val_loss_history_it = {}
+local forward_backward_times = {} -- record the spent time of each forward backward pass
+local memory_usage = {} -- record the memory usage
 local start_i = 0
+
 if opt.init_from ~= '' then
   local initfilename = filedir .. opt.init_from
   print('Initializing from ', initfilename)
   local checkpoint = torch.load(initfilename)
   model = checkpoint.model:type(dtype)
   if opt.reset_iterations == 0 then
+    train_loss_history = checkpoint.train_loss_history
+    val_loss_history = checkpoint.val_loss_history
+    val_loss_history_it = checkpoint.val_loss_history_it
+    forward_backward_times = checkpoint.forward_backward_times
+    memory_usage = checkpoint.memory_usage
     start_i = checkpoint.i
   end
 else
@@ -112,11 +120,7 @@ local crit = nn.CrossEntropyCriterion():type(dtype) -- criterion (the output is 
 
 -- Set up some variables we will use below
 local N, T = opt.batch_size, opt.seq_length
-local train_loss_history = {}
-local val_loss_history = {}
-local val_loss_history_it = {}
-local forward_backward_times = {} -- record the spent time of each forward backward pass
-local init_memory_usage, memory_usage = nil, {} -- record the memory usage
+local init_memory_usage = nil -- record the memory usage
 
 if opt.memory_benchmark == 1 then
   -- This should only be enabled in GPU mode
@@ -187,7 +191,9 @@ for i = start_i + 1, num_iterations do
   -- Take a gradient step and maybe print, note that adam returns a singleton array of losses
   local _, loss = optim.adam(f, params, optim_config)
   loss[1] = loss[1] / math.log(2) -- using the bits-per-character (BPC) metric
-  table.insert(train_loss_history, loss[1])
+  if i % 1000 == 0 then
+    table.insert(train_loss_history, loss[1])
+  end
   if opt.print_every > 0 and i % opt.print_every == 0 then
     local float_epoch = i / num_train
     local msg = 'Epoch %.2f / %d, i = %d / %d, loss = %f'
@@ -209,10 +215,10 @@ for i = start_i + 1, num_iterations do
     -- Evaluate loss on the validation set
     model:evaluate() -- switch to validation mode
     model:resetStates() -- clear h0
-    local num_val = loader.split_sizes['val']
+    local num_val = loader.split_sizes['test']
     local val_loss = 0
     for j = 1, num_val do
-      local xv, yv = loader:nextBatch('val')
+      local xv, yv = loader:nextBatch('test')
       xv = xv:type(dtype)
       yv = yv:type(dtype):view(N * T)
       local scores = model:forward(xv):view(N * T, -1)

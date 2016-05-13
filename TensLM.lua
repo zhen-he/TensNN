@@ -1,6 +1,5 @@
 require 'torch'
 require 'nn'
-
 require 'TensHidden'
 
 local utils = require 'util.utils'
@@ -21,6 +20,7 @@ function LM:__init(kwargs)
   self.rnn_size = utils.get_kwarg(kwargs, 'rnn_size')
   self.inputShape = utils.get_kwarg(kwargs, 'inputShape')
   self.tensShape = utils.get_kwarg(kwargs, 'tensShape')
+  self.rnn_type = utils.get_kwarg(kwargs, 'rnn_type')
   self.dropout = utils.get_kwarg(kwargs, 'dropout')
 
   local V, H, E = self.vocab_size, self.rnn_size, #self.tensShape
@@ -28,7 +28,7 @@ function LM:__init(kwargs)
   self.net = nn.Sequential()
   self.net:add(nn.LookupTable(V, 2 * E * H)) -- embedding, N * T -> N * T * 2EH
 
-  self.tensHidden = nn.TensHidden(self.inputShape, self.tensShape, H, self.dropout)
+  self.tensHidden = nn.TensHidden(self.inputShape, self.tensShape, H, self.rnn_type)
   self.tensHidden.remember_states = true
   self.net:add(self.tensHidden)
 
